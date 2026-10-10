@@ -1,8 +1,18 @@
 """The local engine for ``convert``.
 
+## Two engines under one strategy
+
+Markdown to HTML, and Markdown or HTML to plain text, run in pure Python
+(``tools/_engines/converter.py``) -- they work on a fresh ``pip install``.
+Everything else (Word, OpenDocument, EPUB, LaTeX, reStructuredText) needs a
+real document model, and goes to Pandoc **if it is installed**. Which path a
+request takes is decided by ``converter.supports``, so the boundary has one
+owner. A request for the Pandoc path with no Pandoc raises
+``LocalDependencyMissingError``, which names the cloud engine as the way out.
+
 ## What this converts, and what it does not
 
-Pandoc, and only Pandoc. Eight formats -- Markdown, HTML, Word, OpenDocument,
+Eight formats -- Markdown, HTML, Word, OpenDocument,
 reStructuredText, LaTeX source, EPUB and plain text -- declared in
 ``tools/_formats.py`` and nowhere else.
 
@@ -29,11 +39,13 @@ Nothing here is imported at module scope beyond ``core`` and the format table.
 
 from __future__ import annotations
 
+import importlib.util
 from typing import TYPE_CHECKING, Any
 
 from docmax.core.errors import InvalidParameterError
 from docmax.core.models import Engine, ToolResult
 from docmax.tools import _binaries, _formats
+from docmax.tools._engines import converter
 from docmax.tools.convert.validators import writes_readable_output
 
 if TYPE_CHECKING:
@@ -50,12 +62,15 @@ BINARY = "pandoc"
 
 
 class ConvertLocal:
-    """Convert one document into another format by running Pandoc."""
+    """Convert one document into another format: built in where possible, else Pandoc."""
 
     def is_available(self) -> bool:
-        # `shutil.which`, not a subprocess: availability is asked on every
-        # routing decision, including the ones that choose a different engine.
-        return _binaries.find(BINARY) is not None
+        # Always, in practice: the built-in converter ships with the package, so
+        # the engine can always take *some* request. Whether Pandoc is needed is
+        # a property of the request, and `run` reports it.
+        return importlib.util.find_spec("markdown") is not None or (
+            _binaries.find(BINARY) is not None
+        )
 
     def unavailable_reason(self) -> str | None:
         """Why not, including how to fix it.
@@ -96,6 +111,11 @@ class ConvertLocal:
         target_format = _target_format(params)
         source_format = _source_format(document)
         standalone = _standalone(params)
+
+        if converter.supports(source_format.name, target_format.name):
+            return self._run_builtin(
+                document, target, source_format, target_format, standalone, progress, cancellation
+            )
 
         binary = _binaries.require(BINARY, tool="convert")
         started = time.monotonic()
@@ -138,6 +158,59 @@ class ConvertLocal:
             engine_used=Engine.LOCAL,
             duration_ms=int((time.monotonic() - started) * 1000),
             engine_version=_version(binary, cancellation),
+            details={
+                "from": source_format.name,
+                "to": target_format.name,
+                "standalone": standalone,
+                "source_bytes": document.size_bytes,
+                "output_bytes": target.destination.stat().st_size,
+            },
+        )
+
+    def _run_builtin(
+        self,
+        document: DocumentRef,
+        target: OutputTarget,
+        source_format: Format,
+        target_format: Format,
+        standalone: bool,
+        progress: ProgressSink,
+        cancellation: CancellationToken,
+    ) -> ToolResult:
+        """The pure-Python path: read, convert in memory, commit atomically."""
+        import time
+
+        from docmax.core.atomic import atomic_write
+        from docmax.core.errors import CorruptDocumentError
+
+        started = time.monotonic()
+        progress.start(f"Converting {source_format.label} to {target_format.label}", total=None)
+        cancellation.raise_if_cancelled(operation="convert")
+
+        try:
+            text = document.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise CorruptDocumentError(
+                f"{document.path.name} could not be read as UTF-8 text: {exc}",
+                context={"path": str(document.path)},
+            ) from exc
+
+        converted = converter.convert(
+            text,
+            source=source_format.name,
+            target=target_format.name,
+            standalone=standalone,
+        )
+
+        with atomic_write(target, validators=(writes_readable_output(target_format),)) as handle:
+            handle.write(converted.encode("utf-8"))
+            progress.advance()
+
+        return ToolResult(
+            outputs=(target.destination,),
+            engine_used=Engine.LOCAL,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            engine_version=converter.version(),
             details={
                 "from": source_format.name,
                 "to": target_format.name,

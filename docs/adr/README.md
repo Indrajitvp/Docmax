@@ -53,6 +53,7 @@ turned out to be wrong is as useful as the reasoning that held.
 | [0038](0038-remove-bg-and-compress-image-ship-local-only.md) | `remove-bg` and `compress-image` ship local-only, no cloud engine | Accepted |
 | [0039](0039-mcp-connect-writes-a-clients-config-file.md) | `docmax mcp connect` writes a client's config file directly | Accepted |
 | [0040](0040-the-tui-batch-screen-is-hand-written-and-calls-runners-directly.md) | The TUI's batch screen is hand-written, and calls `runners.batch` directly | Accepted |
+| [0041](0041-core-engines-are-built-in.md) | Rendering, compression and simple conversion are built in; Ghostscript and Poppler are retired | Accepted |
 
 ## When to write one
 

@@ -1,8 +1,7 @@
 """Checks run against the staged output of ``compress``, before it replaces anything.
 
-Ghostscript is the reason this matters more here than elsewhere. It can exit
-zero having written nothing, and it can produce a file that is technically a PDF
-but has lost pages. Both are caught while the destination is still untouched.
+A compressor can write nothing, or write a file that is technically a PDF but
+has lost pages. Both are caught while the destination is still untouched.
 """
 
 from __future__ import annotations
@@ -26,13 +25,13 @@ def is_readable_pdf(produced: Path) -> None:
         pages = len(PdfReader(str(produced)).pages)
     except (PyPdfError, OSError, ValueError) as exc:
         raise OutputValidationError(
-            f"Ghostscript produced something that is not a readable PDF: {exc}",
+            f"Compression produced something that is not a readable PDF: {exc}",
             context={"path": str(produced)},
         ) from exc
 
     if pages == 0:
         raise OutputValidationError(
-            "Ghostscript produced a PDF with no pages.",
+            "Compression produced a PDF with no pages.",
             context={"path": str(produced)},
         )
 

@@ -242,11 +242,19 @@ def _stream(
 # ---------------------------------------------------------------------------
 
 
-def missing_binaries(specs: Sequence[ToolSpec]) -> dict[str, tuple[str, ...]]:
-    """Binary name -> the tool names among `specs` that need it and lack it."""
+def missing_binaries(
+    specs: Sequence[ToolSpec], *, include_optional: bool = False
+) -> dict[str, tuple[str, ...]]:
+    """Binary name -> the tool names among `specs` that need it and lack it.
+
+    Optional binaries (``ToolSpec.optional_binaries``) are included only when
+    asked for: a bare ``setup`` must not propose installing something no tool
+    needs in order to run.
+    """
     needed: dict[str, set[str]] = {}
     for spec in specs:
-        for name in spec.requires_binaries:
+        wanted = (*spec.requires_binaries, *(spec.optional_binaries if include_optional else ()))
+        for name in wanted:
             needed.setdefault(name, set()).add(spec.name)
     return {
         name: tuple(sorted(tools)) for name, tools in needed.items() if _binaries.find(name) is None

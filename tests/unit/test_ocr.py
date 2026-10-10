@@ -2,9 +2,8 @@
 
 The shape follows what `compress` established at M3 and `convert` reused at M5:
 
-* **The contract** is tested against *fake binaries* that are real subprocesses.
-  Two of them, because OCR runs Poppler and then Tesseract, and the fake
-  dispatches on which was asked for. This is what lets every behaviour below —
+* **The contract** is tested against a *fake Tesseract* that is a real subprocess.
+  Rasterisation is PyMuPDF, in-process and real. This is what lets every behaviour below —
   a failed page, a lost page, a blank text layer, a timeout, a cancellation —
   be tested on a machine with no OCR software installed at all.
 * **Real recognition** is one test, marked `needs_binary`, skipped where
@@ -47,10 +46,8 @@ needs_tesseract = pytest.mark.needs_binary("tesseract")
 #: The marker *selects* the test into CI's external-binary job; it does not skip.
 #: `compress` pairs it with a `skipif` for that, and this follows it — two of
 #: M5's real-binary tests do not, and they fail rather than skip on a machine
-#: without Pandoc or Poppler. OCR needs both binaries, so both are checked.
-TOOLCHAIN_PRESENT = (
-    _binaries.find("tesseract") is not None and _binaries.find("pdftoppm") is not None
-)
+#: without Pandoc. OCR needs Tesseract and nothing else installed.
+TOOLCHAIN_PRESENT = _binaries.find("tesseract") is not None
 
 #: Long enough to clear `validators.MIN_TEXT_CHARS`, so a page carrying it
 #: counts as already searchable.
@@ -125,22 +122,6 @@ def staged(directory: Path) -> list[str]:
 # The fake OCR toolchain
 # ---------------------------------------------------------------------------
 
-#: Poppler's part: draw a page as a PNG. The fake writes a tiny real PNG, so
-#: the deskew step downstream has something it can actually open.
-POPPLER_OK = """
-root = args[-1]
-import zlib, struct
-def chunk(tag, data):
-    c = tag + data
-    return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c))
-raw = b''.join(b'\\x00' + bytes([255, 255, 255] * 8) for _ in range(8))
-png = (b'\\x89PNG\\r\\n\\x1a\\n'
-       + chunk(b'IHDR', struct.pack('>IIBBBBB', 8, 8, 8, 2, 0, 0, 0))
-       + chunk(b'IDAT', zlib.compress(raw))
-       + chunk(b'IEND', b''))
-open(root + '.png', 'wb').write(png)
-"""
-
 #: Tesseract's part: emit a one-page PDF carrying real extractable text.
 TESSERACT_OK = """
 root = args[1]
@@ -180,15 +161,13 @@ def install_toolchain(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
-    poppler: str = POPPLER_OK,
     tesseract: str = TESSERACT_OK,
     langs: str = LIST_LANGS,
 ) -> None:
-    """Point `ocr` at two fakes, through the real binary mechanism.
+    """Point `ocr` at a fake Tesseract, through the real binary mechanism.
 
-    The dispatch is on the *arguments* `ocr` actually built — `-singlefile` for
-    Poppler, the literal `pdf` for Tesseract — so the flags this tool constructs
-    are exercised as written rather than assumed.
+    The fake sees the arguments `ocr` actually built, so the flags this tool
+    constructs are exercised as written rather than assumed.
     """
     script = tmp_path / "fake_ocr_toolchain.py"
     script.write_text(
@@ -199,7 +178,7 @@ def install_toolchain(
         "    sys.stdout.write(LANGS)\n"
         "elif '--version' in args:\n"
         "    sys.stdout.write('tesseract 9.9.9-fake')\n"
-        "elif '-singlefile' in args:\n" + _indent(poppler) + "else:\n" + _indent(tesseract),
+        "else:\n" + _indent(tesseract),
         encoding="utf-8",
     )
     real_run = _binaries.run
@@ -592,7 +571,7 @@ def test_a_missing_dependency_is_reported_with_an_install_command() -> None:
     if reason is None:  # pragma: no cover — a machine with the full toolchain
         pytest.skip("the OCR toolchain is installed here")
 
-    assert "tesseract" in reason or "pdftoppm" in reason
+    assert "tesseract" in reason
     # It used to say `setup --ocr`, a command that does not exist. ADR 0022.
     assert "setup --ocr" not in install_hint()
     assert "--engine cloud" in install_hint()
@@ -617,10 +596,7 @@ def test_missing_dependencies_names_exactly_whats_absent(monkeypatch: pytest.Mon
     invented, and never a third-party mirror."""
     from docmax.tools.ocr.local import OcrLocal
 
-    def find(name: str) -> str | None:
-        return "/usr/bin/pdftoppm" if name == "pdftoppm" else None
-
-    monkeypatch.setattr(_binaries, "find", find)
+    monkeypatch.setattr(_binaries, "find", lambda name: None)
 
     (missing,) = OcrLocal().missing_dependencies()
 
@@ -663,7 +639,7 @@ def test_the_router_reports_ocrs_missing_dependencies_generically(
     reported = router.missing_dependencies("ocr", Engine.LOCAL)
 
     names = {dependency.name for dependency in reported}
-    assert names == {"tesseract", "pdftoppm"}
+    assert names == {"tesseract"}, "rasterisation is built in, so only Tesseract can be missing"
     assert all(dependency.url for dependency in reported)
 
 
@@ -729,8 +705,11 @@ def test_a_run_where_every_page_fails_is_an_error(
 def test_a_rasteriser_that_writes_nothing_is_survivable(
     router: EngineRouter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Poppler exiting zero without drawing — `compress` guards the same case."""
-    install_toolchain(monkeypatch, tmp_path, poppler="pass")
+    """A renderer that draws nothing: every page fails, and so does the run."""
+    from docmax.tools._engines import renderer
+
+    install_toolchain(monkeypatch, tmp_path)
+    monkeypatch.setattr(renderer, "render_page", lambda *args, **kwargs: None)
     out = tmp_path / "out.pdf"
 
     with pytest.raises(ExternalToolFailedError):
@@ -876,7 +855,7 @@ def test_a_hung_recogniser_times_out(
             router,
             write_pdf(tmp_path / "s.pdf", 1),
             out,
-            cancellation=CancellationToken(timeout=1.0),
+            cancellation=CancellationToken(timeout=3.0),
         )
 
     assert not out.exists()
@@ -889,7 +868,7 @@ def test_a_hung_recogniser_times_out(
 
 @needs_tesseract
 @pytest.mark.golden
-@pytest.mark.skipif(not TOOLCHAIN_PRESENT, reason="Tesseract and Poppler are not installed")
+@pytest.mark.skipif(not TOOLCHAIN_PRESENT, reason="Tesseract is not installed")
 def test_real_tesseract_makes_a_rendered_page_searchable(
     router: EngineRouter, tmp_path: Path
 ) -> None:

@@ -100,7 +100,7 @@ _DEFAULT_ALGORITHM = protect_spec.DEFAULT_ALGORITHM
 #: full; these two strings are only the short version for `--help`. ADR 0010.
 _CONVERT_FORMATS = ", ".join(_formats.convertible_names())
 _IMAGE_FORMATS = ", ".join(_formats.rasterisable_names())
-#: `to-images` writes only what pdftoppm produces; `convert-image` reads and
+#: `to-images` writes only PNG, JPEG and TIFF; `convert-image` reads and
 #: writes every declared raster format, so the two lists genuinely differ.
 _CONVERTIBLE_IMAGE_FORMATS = ", ".join(_formats.readable_image_names())
 #: `resize`'s fit modes, listed by the spec that declares them.
@@ -464,7 +464,7 @@ def ocr(
     pack that is not installed is refused by name, with the installed ones
     listed.
 
-    Needs Tesseract and Poppler locally; `--engine cloud` needs neither.
+    Needs Tesseract locally; `--engine cloud` needs nothing installed.
     """
     from docmax.cli import json_output
     from docmax.cli.execution import execute
@@ -624,17 +624,16 @@ def compress(
         Path, typer.Option("--output", "-o", help="Where to write the result.", show_default=False)
     ],
     preset: Annotated[
-        str, typer.Option("--preset", help="Ghostscript preset: screen, ebook, printer, prepress.")
+        str, typer.Option("--preset", help="Quality preset: screen, ebook, printer, prepress.")
     ] = "ebook",
     force: _ForceOption = False,
     engine: _EngineOption = None,
     dry_run: _DryRunOption = False,
     json_out: JsonOption = False,
 ) -> None:
-    """Shrink a PDF with Ghostscript.
+    """Shrink a PDF by recompressing its images and structure.
 
-    Needs Ghostscript installed — run `docmax doctor` to check, and it will
-    print the install line for your platform. The page count is verified before
+    Built in — nothing to install. The page count is verified before
     the result replaces anything, because a smaller file with fewer pages is not
     a compressed document.
     """
@@ -1073,14 +1072,17 @@ def convert(
     dry_run: _DryRunOption = False,
     json_out: JsonOption = False,
 ) -> None:
-    """Convert a document to another format with Pandoc.
+    """Convert a document to another format.
+
+    Markdown to HTML and plain text, and HTML to plain text, are built in.
+    Word, OpenDocument, EPUB, LaTeX and reStructuredText need Pandoc.
 
     **PDF is not supported in either direction.** Pandoc has no PDF reader, and
     writing PDF needs a LaTeX distribution DocMax does not install — see
     [ADR 0011](https://github.com/megabyte44/docmax/blob/main/docs/adr/0011-convert-is-pandoc-only.md).
     To turn a PDF into images use `to-images`.
 
-    Needs Pandoc installed — run `docmax doctor` to check, and it will print the
+    Pandoc is optional — run `docmax doctor` to check, and it will print the
     install line for your platform. Run `docmax formats` for the full table.
 
     `-o` names the destination outright rather than defaulting to `Path | None`
@@ -1133,9 +1135,8 @@ def to_images(
     run leaves the destination exactly as it was rather than holding the first
     few pages.
 
-    Needs Poppler installed — run `docmax doctor` to check. Every image is
-    verified to carry a real header of its format before the directory replaces
-    anything.
+    Built in — nothing to install. Every image is verified to carry a real
+    header of its format before the directory replaces anything.
     """
     from docmax.cli import json_output
     from docmax.cli.execution import execute

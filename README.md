@@ -30,7 +30,7 @@ docmax merge report_q1.pdf report_q2.pdf -o annual_report.pdf
 # OCR a scanned PDF with auto-deskewing
 docmax ocr scan.pdf -o searchable.pdf --lang eng+fra
 
-# Compress a heavy PDF using Ghostscript presets
+# Compress a heavy PDF with quality presets (built in, nothing else to install)
 docmax compress document.pdf -o compressed.pdf --preset ebook
 
 # Connect directly to your AI assistant (Claude Desktop, Cursor, Claude Code)
@@ -47,7 +47,8 @@ DocMax takes a **terminal-native, architecture-first** approach:
 
 | Feature | DocMax | Traditional Web Tools | Ad-Hoc Scripts |
 |---|:---:|:---:|:---:|
-| **Installation** | Single `pip install` | Docker + container orchestration | Fragmented CLI tools |
+| **Installation** | Single `pip install`; no system binaries needed | Docker + container orchestration | Fragmented CLI tools (Ghostscript, Poppler, Pandoc, ...) |
+| **Cross-platform setup** | Identical on macOS, Linux and Windows | Depends on the container host | Per-OS package managers and `PATH` fixes |
 | **Interface** | CLI, Full-Screen TUI & MCP | Web browser UI | Terminal only |
 | **Scripting & CI/CD** | Native argv + `--json` | REST API against running daemon | Shell scripts |
 | **Over SSH / Headless** | First-class native support | Requires SSH port forwarding | Works |
@@ -75,7 +76,7 @@ DocMax was built from the ground up to prevent destructive file operations and s
 
 Every tool can run two ways, with your privacy always in your control:
 
-- **Local Engine (Default):** Runs 100% offline on your machine using local binaries and Python libraries.
+- **Local Engine (Default):** Runs 100% offline on your machine. Rendering, compression and Markdown/HTML conversion are built in (PyMuPDF, pypdf, `markdown`) — no system programs to install.
 - **Cloud Engine (Optional):** Offloads compute-heavy operations (`compress`, `convert`, `ocr`) to an external or self-hosted Cloud Engine server without requiring heavy local system dependencies.
 
 ```bash
@@ -125,10 +126,10 @@ DocMax provides over 20+ purpose-built tools across document and image workflows
 | Command | Description | Engine |
 |---|---|:---:|
 | `docmax ocr` | Generate searchable PDFs with Tesseract OCR, auto-deskew, and language selection | Local / Cloud |
-| `docmax compress` | Optimize and downsample PDFs via Ghostscript presets (`screen`, `ebook`, `printer`) | Local / Cloud |
+| `docmax compress` | Optimize and downsample PDFs with quality presets (`screen`, `ebook`, `printer`, `prepress`) | Local / Cloud |
 | `docmax watermark` | Apply custom text watermarks with opacity, rotation, and 9 alignment anchors | Local |
 | `docmax stamp` | Overlay a page from another PDF as a stamp or official letterhead | Local |
-| `docmax convert` | Convert documents between Markdown, HTML, Word, ODT, LaTeX, EPUB, and TXT | Local / Cloud |
+| `docmax convert` | Markdown/HTML to HTML and TXT built in; Word, ODT, LaTeX, EPUB and RST via optional Pandoc | Local / Cloud |
 | `docmax to-images` | Rasterize PDF pages to high-resolution PNG, JPEG, or TIFF images | Local |
 | `docmax from-images` | Assemble raster images into a single PDF (lossless JPEG passthrough) | Local |
 
@@ -166,23 +167,30 @@ pip install "Docmax[remove-bg]" # AI-powered background removal
 pip install "Docmax[all]"
 ```
 
-### External Binaries
+### What `pip install` already gives you
 
-Certain local engines rely on battle-tested system binaries:
-- **Ghostscript** (`gs`): Used by `compress`
-- **Tesseract** (`tesseract`): Used by `ocr`
-- **Poppler** (`pdftoppm`): Used by `to-images` and `ocr`
-- **Pandoc** (`pandoc`): Used by `convert`
+`merge`, `split`, `compress`, `to-images`, and `convert` for Markdown/HTML run on libraries that
+install as wheels on macOS, Linux and Windows. **No Ghostscript, Poppler or system package
+manager is involved.**
 
-DocMax makes checking and installing these effortless:
+Two optional programs add capability; both have a cloud fallback (`--engine cloud`):
+- **Tesseract** (`tesseract`): local `ocr`. There is no pure-Python equivalent.
+- **Pandoc** (`pandoc`): `convert` to or from Word, ODT, LaTeX, EPUB and reStructuredText.
 
 ```bash
-# Inspect system dependency status
+# Report what is built in and which optional programs are present
 docmax doctor
 
-# Automatically install missing binaries for your platform (brew / apt / winget)
-docmax setup
+# Install Tesseract with your platform's package manager (brew / apt / winget)
+docmax setup ocr
+
+# Same for Pandoc, only when you ask for it by name
+docmax setup convert
 ```
+
+> PyMuPDF, which does the rendering and compression, is AGPL-3.0 licensed (commercial licences
+> are available from Artifex). It is installed alongside DocMax rather than bundled into it;
+> read its licence before redistributing a product built on top of this.
 
 ---
 

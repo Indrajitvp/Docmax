@@ -3,8 +3,10 @@
 Rasterise, deskew, recognise, reassemble. Four steps, one page at a time.
 
 Three things have to be present for this to run: the Tesseract binary, a
-language pack, and Poppler for rasterisation — plus OpenCV if pages are to be
-straightened. Any of them can be missing on its own, so availability reports
+language pack, and PyMuPDF for rasterisation (a base dependency, so always) —
+plus OpenCV if pages are to be straightened. Tesseract is the one piece with no
+pure-Python equivalent, which is why ``--engine cloud`` remains the answer on a
+machine without it. Any of them can be missing on its own, so availability reports
 *which*: a router that can only say "unavailable" cannot tell the user what to
 install, and cannot explain why it is offering the cloud engine instead.
 
@@ -50,6 +52,7 @@ from docmax.core.branding import CLI_NAME
 from docmax.core.errors import InvalidParameterError
 from docmax.core.models import Engine, ToolResult
 from docmax.tools import _binaries, _deskew, _dpi
+from docmax.tools._engines import renderer
 from docmax.tools._pdf import open_pdf, page_count, save
 from docmax.tools.ocr.validators import checks_for, has_text
 
@@ -61,11 +64,10 @@ if TYPE_CHECKING:
     from docmax.core.models import DocumentRef, OutputTarget
     from docmax.core.protocols import EngineStrategy, MissingDependency, ProgressSink
 
-#: The recogniser, and the rasteriser. Both are declared in ``_binaries`` with
-#: their per-platform install lines, and ``doctor`` has reported on both since M0.
+#: The recogniser, declared in ``_binaries`` with its per-platform install
+#: lines. Rasterisation used to be a second binary (Poppler); it is PyMuPDF now.
 TESSERACT = "tesseract"
-PDFTOPPM = "pdftoppm"
-BINARIES = (TESSERACT, PDFTOPPM)
+BINARIES = (TESSERACT,)
 
 #: OpenCV, and only for ``--deskew``. It is the whole of the ``ocr`` extra:
 #: ADR 0022 records why ``pytesseract`` and ``pdf2image`` are not used, and what
@@ -74,7 +76,7 @@ PYTHON_DEPENDENCIES = ("cv2",)
 
 #: PNG rather than JPEG: recognition on a lossy image is worse for no saving
 #: that survives the page being re-encoded into the output anyway.
-_RASTER_FLAG = "-png"
+_RASTER_FORMAT = "png"
 _RASTER_SUFFIX = ".png"
 
 #: Tesseract appends this to the output root it is given.
@@ -203,7 +205,6 @@ class OcrLocal:
         total = page_count(reader)
 
         tesseract = _binaries.require(TESSERACT, tool="ocr")
-        pdftoppm = _binaries.require(PDFTOPPM, tool="ocr")
         if deskew and not _deskew.is_available():
             raise _opencv_missing()
         _require_languages(tesseract, lang, cancellation)
@@ -239,7 +240,6 @@ class OcrLocal:
                     page_number,
                     workspace=workspace,
                     tesseract=tesseract,
-                    pdftoppm=pdftoppm,
                     lang=lang,
                     dpi=dpi,
                     deskew=deskew,
@@ -297,7 +297,6 @@ class OcrLocal:
         *,
         workspace: Path,
         tesseract: str,
-        pdftoppm: str,
         lang: str,
         dpi: int,
         deskew: bool,
@@ -311,35 +310,23 @@ class OcrLocal:
         a page its box does not fit. The run as a whole still fails if *every*
         page failed, which is the case that means something is actually wrong.
         """
-        from docmax.core.errors import ExternalToolFailedError
+        from docmax.core.errors import CorruptDocumentError, ExternalToolFailedError
 
         image_root = workspace / f"page-{page_number:05d}"
         text_root = workspace / f"ocr-{page_number:05d}"
 
-        # `-singlefile` writes exactly `<root>.png`, with no page number of its
-        # own — whose zero-padding width has varied between Poppler releases.
-        _binaries.run(
-            [
-                pdftoppm,
-                _RASTER_FLAG,
-                "-r",
-                str(dpi),
-                "-f",
-                str(page_number),
-                "-l",
-                str(page_number),
-                "-singlefile",
-                str(source),
-                str(image_root),
-            ],
-            tool="ocr",
-            cancellation=cancellation,
-        )
-
         image = image_root.with_suffix(_RASTER_SUFFIX)
+        document = renderer.open_document(source)
+        try:
+            renderer.render_page(
+                document, page_number - 1, image, dpi=dpi, format_name=_RASTER_FORMAT
+            )
+        except CorruptDocumentError:
+            # One page that would not draw is a failed page, not a failed run.
+            return None
+        finally:
+            document.close()
         if not image.is_file():
-            # Poppler exited zero without drawing anything. Rare, and precisely
-            # the class of failure `compress` guards against for Ghostscript.
             return None
 
         if deskew and _deskew.straighten(image) != 0.0:

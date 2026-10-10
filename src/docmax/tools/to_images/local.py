@@ -1,30 +1,21 @@
 """The local engine for ``to-images``.
 
-## Pillow is not needed, and is not used
+## PyMuPDF draws the page, in-process
 
-``pdftoppm`` draws the page *and writes the file* -- it emits PNG, JPEG and TIFF
-itself. Loading the result into Pillow only to write it out again would re-encode
-every page for no gain, add a dependency to a tool that does not need one, and
-put a second encoder between the user and their pixels. So the ``images`` extra
-is ``from-images``' dependency, not this tool's, and this engine's availability
-is a single ``shutil.which``.
+This used to run Poppler's ``pdftoppm``, which pip cannot install: a fresh
+``pip install`` failed its first ``to-images`` with a system-package instruction.
+PyMuPDF ships as a wheel on every supported platform, so the engine is now
+available whenever the package is, and the install story is one command.
 
-## One process per page
+It is also cheaper. ``pdftoppm`` took a contiguous page range, so an arbitrary
+selection like ``1-3,7`` meant one process launch per page -- a thousand-page
+document was perhaps twenty seconds of pure overhead. A function call per page
+keeps everything that choice bought (arbitrary selections, a progress bar that
+advances per page, cancellation that takes effect within one page) and drops the
+cost.
 
-``pdftoppm`` takes a contiguous ``-f``/``-l`` range, and a page selection like
-``1-3,7`` is not contiguous. It also names its own output, padding the page
-number to a width that has varied between Poppler releases -- so predicting the
-filenames means depending on a detail that is not part of any contract.
-
-Both problems disappear by rendering one page per invocation with
-``-singlefile``, which writes exactly ``<root>.<ext>`` and no number at all.
-DocMax then names the file, so the naming matches ``split``'s and sorts the way
-the document reads.
-
-The cost is real and worth stating: a thousand-page document is a thousand
-process launches, which is perhaps twenty seconds of pure overhead. It buys
-arbitrary page selections, a progress bar that advances per page, and
-cancellation that takes effect within one page rather than at the end.
+PyMuPDF writes PNG and JPEG itself; TIFF goes through Pillow when the ``images``
+extra is installed. See ``tools/_engines/renderer.py``.
 
 ## The output is a directory
 
@@ -38,9 +29,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from docmax.core.branding import DIST_NAME
 from docmax.core.errors import InvalidParameterError
 from docmax.core.models import Engine, ToolResult
-from docmax.tools import _binaries, _dpi, _pagespec
+from docmax.tools import _dpi, _pagespec
+from docmax.tools._engines import has_pymupdf, renderer
 from docmax.tools._pdf import open_pdf, page_count
 from docmax.tools.to_images.validators import image_format_for, renders_images
 
@@ -51,10 +44,6 @@ if TYPE_CHECKING:
     from docmax.core.cancellation import CancellationToken
     from docmax.core.models import DocumentRef, OutputTarget
     from docmax.core.protocols import EngineStrategy, ProgressSink
-
-#: The name in ``_binaries``, declared there since M0 as
-#: ``used_by=("ocr", "to-images")``. Poppler, not Pillow.
-BINARY = "pdftoppm"
 
 #: Zero-padded so a directory listing sorts the way the document reads. Matches
 #: ``split``, because two tools that both number their outputs should not number
@@ -69,23 +58,21 @@ _DEFAULT_DPI = 150
 
 
 class ToImagesLocal:
-    """Render pages to image files with Poppler's pdftoppm."""
+    """Render pages to image files with PyMuPDF."""
 
     def is_available(self) -> bool:
-        # `shutil.which`, not a subprocess: availability is asked on every
-        # routing decision, including the ones that choose a different engine.
-        return _binaries.find(BINARY) is not None
+        # `find_spec`, not an import: availability is asked on every routing
+        # decision, including the ones that choose a different engine.
+        return has_pymupdf()
 
     def unavailable_reason(self) -> str | None:
-        """Why not, including how to fix it.
-
-        Names Poppler as well as the binary: nobody installs a package called
-        ``pdftoppm``, and a user told only the executable's name has to work out
-        which project ships it before they can act.
-        """
+        """Why not, including how to fix it."""
         if self.is_available():
             return None
-        return f"{BINARY} (Poppler) is not installed. {_binaries.describe(BINARY).install_hint()}"
+        return (
+            f'PyMuPDF is not installed. Install it with: pip install "{DIST_NAME}" '
+            "(it is a base dependency, so a broken environment is the likely cause)."
+        )
 
     def run(
         self,
@@ -108,18 +95,22 @@ class ToImagesLocal:
             )
 
         image_format = image_format_for(params)
+        if image_format.name not in renderer.supported_formats():
+            raise InvalidParameterError(
+                f"`to-images` cannot write {image_format.label}.",
+                remedy=f"Use one of: {', '.join(renderer.supported_formats())}.",
+                context={"parameter": "format", "format": image_format.name},
+            )
         dpi = _dpi.parse(params.get("dpi"), default=_DEFAULT_DPI)
 
         document = docs[0]
 
-        # The document is read, and the selection resolved, before the binary is
-        # looked for -- so a bad `--pages` is reported as a bad selection rather
-        # than as a missing dependency.
+        # The document is read, and the selection resolved, before anything is
+        # rendered -- so a bad `--pages` is reported as a bad selection.
         reader = open_pdf(document)
         total = page_count(reader)
         selected = _pagespec.parse(params.get("pages"), total=total)
 
-        binary = _binaries.require(BINARY, tool="to-images")
         started = time.monotonic()
 
         stem = document.path.stem
@@ -128,46 +119,30 @@ class ToImagesLocal:
 
         progress.start(f"Rendering {len(selected)} of {total} page(s)", total=len(selected))
 
-        with atomic_dir(
-            target, validators=(renders_images(len(selected), image_format),)
-        ) as staged:
-            for index in selected:
-                # Between pages: nothing is at the destination yet, and the
-                # staged directory is discarded wholesale on the way out.
-                cancellation.raise_if_cancelled(operation="to-images")
+        pdf = renderer.open_document(document.path)
+        try:
+            with atomic_dir(
+                target, validators=(renders_images(len(selected), image_format),)
+            ) as staged:
+                for index in selected:
+                    # Between pages: nothing is at the destination yet, and the
+                    # staged directory is discarded wholesale on the way out.
+                    cancellation.raise_if_cancelled(operation="to-images")
 
-                page = index + 1
-                # pdftoppm appends the extension itself, so the root it is given
-                # carries none.
-                root = staged / f"{stem}-{page:0{width}d}"
-                _binaries.run(
-                    [
-                        binary,
-                        str(image_format.rasterise_flag),
-                        "-r",
-                        str(dpi),
-                        # One page, named exactly: `-singlefile` is what stops
-                        # pdftoppm appending a page number of its own, whose
-                        # width has varied between Poppler releases.
-                        "-f",
-                        str(page),
-                        "-l",
-                        str(page),
-                        "-singlefile",
-                        str(document.path),
-                        str(root),
-                    ],
-                    tool="to-images",
-                    cancellation=cancellation,
-                )
-                written.append(target.destination / f"{root.name}{image_format.suffix}")
-                progress.advance()
+                    name = f"{stem}-{index + 1:0{width}d}{image_format.suffix}"
+                    renderer.render_page(
+                        pdf, index, staged / name, dpi=dpi, format_name=image_format.name
+                    )
+                    written.append(target.destination / name)
+                    progress.advance()
+        finally:
+            pdf.close()
 
         return ToolResult(
             outputs=tuple(written),
             engine_used=Engine.LOCAL,
             duration_ms=int((time.monotonic() - started) * 1000),
-            engine_version=_version(binary, cancellation),
+            engine_version=renderer.version(),
             details={
                 "files": len(written),
                 "pages": len(selected),
@@ -178,33 +153,9 @@ class ToImagesLocal:
         )
 
 
-# ---------------------------------------------------------------------------
-# Parameters
-# ---------------------------------------------------------------------------
-
-
-def _version(binary: str, cancellation: CancellationToken) -> str:
-    """Whatever actually did the work, in the same form the cloud engine reports.
-
-    Best-effort: a version probe that failed must not fail a render that already
-    succeeded. ``pdftoppm -v`` writes to stderr rather than stdout, which is
-    unusual enough to be worth saying out loud.
-    """
-    from docmax.core.errors import DocMaxError
-
-    try:
-        completed = _binaries.run([binary, "-v"], tool="to-images", cancellation=cancellation)
-    except DocMaxError:
-        return f"{BINARY}/unknown"
-
-    reported = (completed.stderr or completed.stdout or b"").decode("utf-8", errors="replace")
-    first = reported.strip().splitlines()
-    return f"{BINARY}/{first[0].strip() if first else 'unknown'}"
-
-
 def build() -> EngineStrategy:
     """Factory the registry calls. Every strategy module exposes exactly this."""
     return ToImagesLocal()
 
 
-__all__ = ["BINARY", "ToImagesLocal", "build"]
+__all__ = ["ToImagesLocal", "build"]

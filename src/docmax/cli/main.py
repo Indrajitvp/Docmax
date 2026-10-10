@@ -271,7 +271,11 @@ def formats(json_out: commands.JsonOption = False) -> None:
 
 @app.command()
 def doctor(json_out: commands.JsonOption = False) -> None:
-    """Report the status of external tools the local engines depend on.
+    """Report what the local engines run on.
+
+    Rendering, compression and simple conversions are built in, so they need
+    nothing installed. The only external programs left are Tesseract (for local
+    OCR) and Pandoc (for Word, EPUB and other rich formats) — both optional.
 
     Reports only — never mutates. ``docmax setup`` does the installing.
     """
@@ -285,7 +289,7 @@ def doctor(json_out: commands.JsonOption = False) -> None:
         _emit_doctor_json()
         return
 
-    table = Table(title="External tool status", title_justify="left")
+    table = Table(title="Optional external tools", title_justify="left")
     table.add_column("Tool")
     table.add_column("Status")
     table.add_column("Path")
@@ -293,7 +297,7 @@ def doctor(json_out: commands.JsonOption = False) -> None:
 
     missing: list[_binaries.Binary] = []
     for binary in _binaries.EXTERNAL_BINARIES:
-        used_by = ", ".join(binary.used_by)
+        used_by = ", ".join(binary.needed_by_labels())
         found = _binaries.find(binary.name)
         if found:
             table.add_row(binary.name, "[green]found[/green]", found, used_by)
@@ -301,20 +305,30 @@ def doctor(json_out: commands.JsonOption = False) -> None:
             missing.append(binary)
             table.add_row(binary.name, "[yellow]missing[/yellow]", "—", used_by)
 
+    from docmax.tools._engines import has_pymupdf
+
+    out.print(
+        "Core engines: [green]built in[/green] "
+        + (
+            "(PyMuPDF, pypdf, markdown — no system binaries needed)"
+            if has_pymupdf()
+            else "[yellow](PyMuPDF is missing — reinstall the package)[/yellow]"
+        )
+    )
     out.print(table)
 
     if not missing:
-        console.print("\n[green]All external tools available.[/green]")
+        console.print("\n[green]All optional tools available.[/green]")
         return
 
-    console.print(f"\n[yellow]{len(missing)} tool(s) missing.[/yellow]")
+    console.print(f"\n[yellow]{len(missing)} optional tool(s) not installed.[/yellow]")
     for binary in missing:
         # The exact install command, per platform. That is the difference
         # between a report and something the user can act on.
         console.print(f"  [bold]{binary.name}[/bold] — {binary.install_hint()}")
     console.print(
-        "\nAffected operations can still run via the Cloud Engine (M6), "
-        f"or install locally with [bold]{CLI_NAME} setup[/bold]."
+        "\nEverything else works without them. Affected operations can run via "
+        f"the Cloud Engine, or install locally with [bold]{CLI_NAME} setup[/bold]."
     )
 
 
@@ -327,19 +341,25 @@ def _emit_doctor_json() -> None:
     from docmax.cli import json_output
     from docmax.cli.render import _emit
     from docmax.tools import _binaries
+    from docmax.tools._engines import has_pymupdf
 
     _emit(
         json_output.report(
             {
+                "core_engines": {
+                    "builtin": True,
+                    "pymupdf": has_pymupdf(),
+                },
                 "binaries": [
                     {
                         "name": binary.name,
                         "found": _binaries.find(binary.name),
                         "used_by": list(binary.used_by),
+                        "optional_for": list(binary.optional_for),
                         "install_hint": binary.install_hint(),
                     }
                     for binary in _binaries.EXTERNAL_BINARIES
-                ]
+                ],
             }
         )
     )
@@ -361,6 +381,10 @@ def setup(
     json_out: commands.JsonOption = False,
 ) -> None:
     """Install what ``doctor`` reports missing: Python extras and system binaries.
+
+    Rendering, compression and simple conversions are built in, so a fresh
+    install has nothing to set up for them. What remains is Tesseract (local OCR)
+    and the Python extras; Pandoc is offered only when you name ``convert``.
 
     Installs only what is actually missing, so running this again once nothing
     is missing does nothing.
@@ -394,7 +418,9 @@ def setup(
 
     manager = _binaries.manager_available()
     plan = _install.build_plan(
-        _install.missing_binaries(specs), _install.missing_extras(specs), manager
+        _install.missing_binaries(specs, include_optional=tool is not None),
+        _install.missing_extras(specs),
+        manager,
     )
 
     if not plan:

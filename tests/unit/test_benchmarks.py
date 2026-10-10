@@ -19,9 +19,7 @@ genuinely exercised.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -139,34 +137,8 @@ def test_a_skipped_measurement_says_why_and_carries_no_ratio() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The measuring path, with a fake binary
+# The measuring path
 # ---------------------------------------------------------------------------
-
-
-FAKE_PANDOC = """
-out = args[args.index("--output") + 1]
-open(out, "w", encoding="utf-8").write("<html>converted</html>\\n")
-"""
-
-
-def install_fake(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> None:
-    script = tmp_path / "fake_binary.py"
-    script.write_text(
-        "import sys\n"
-        "args = sys.argv[1:]\n"
-        "if args and args[0] in {'-v', '--version'}:\n"
-        "    print('fake 1.0')\n"
-        "    sys.exit(0)\n" + body,
-        encoding="utf-8",
-    )
-    real_run = _binaries.run
-
-    def run_fake(command: Any, **kwargs: Any) -> Any:
-        return real_run([sys.executable, str(script), *[str(c) for c in command[1:]]], **kwargs)
-
-    monkeypatch.setattr(_binaries, "find", lambda name: sys.executable)
-    monkeypatch.setattr(_binaries, "require", lambda name, *, tool: sys.executable)
-    monkeypatch.setattr(_binaries, "run", run_fake)
 
 
 def test_measure_runs_the_operation_the_promised_number_of_times(tmp_path: Path) -> None:
@@ -203,11 +175,10 @@ def test_each_run_writes_to_a_fresh_destination(tmp_path: Path) -> None:
 def test_the_local_runner_measures_a_real_tool(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """End to end through the real router, with a fake Pandoc as the binary."""
+    """End to end through the real router and the real built-in converter."""
     from benchmarks.__main__ import _local
 
     pytest.importorskip("img2pdf", reason="the images extra is not installed")
-    install_fake(monkeypatch, tmp_path, FAKE_PANDOC)
     fixtures = [item for item in harness.build_fixtures(tmp_path / "f") if item.kind == "markdown"]
 
     results = _local(fixtures, tmp_path / "out")
@@ -224,10 +195,13 @@ def test_a_missing_binary_produces_a_row_that_says_so(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A gap that explains itself beats a missing row."""
-    from benchmarks.__main__ import _local
+    import benchmarks.__main__ as entry
 
     pytest.importorskip("img2pdf", reason="the images extra is not installed")
     monkeypatch.setattr(_binaries, "find", lambda name: None)
+    # Nothing in the default plan needs a binary any more, so name one.
+    monkeypatch.setattr(entry, "_plan", lambda fixture: [("convert", "pandoc", {"to": "docx"})])
+    _local = entry._local
     fixtures = [item for item in harness.build_fixtures(tmp_path / "f") if item.kind == "markdown"]
 
     results = _local(fixtures, tmp_path / "out")
@@ -270,7 +244,7 @@ def test_the_environment_records_which_binaries_were_present() -> None:
     """So a reader can tell a fast run from a run that measured nothing."""
     recorded = harness.environment()["binaries"]
 
-    assert set(recorded) >= {"gs", "pandoc"}
+    assert set(recorded) >= {"tesseract", "pandoc"}
 
 
 def test_no_results_file_is_committed_with_unmeasured_numbers() -> None:
