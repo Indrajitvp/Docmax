@@ -36,10 +36,6 @@ One `pip install`. No Ghostscript, no Poppler, no Docker, no upload.
 Every tool is declared once. The command line, the terminal app, AI assistants over MCP and the
 HTTP API are all generated from that declaration, so they run the same code and can't drift apart.
 
-<div align="center">
-  <img src="docs/assets/architecture.svg" alt="The command line, terminal app, MCP and HTTP API all feed a single DocMax engine made of a tool registry, an engine router and safe writes, which runs the local engine by default or the cloud engine if you opt in" width="860">
-</div>
-
 What that buys you, whichever door you use:
 
 - **Private by default.** Everything runs on your machine. Nothing is uploaded unless you opt in, per tool.
