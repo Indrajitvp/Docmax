@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 540" width="940" height="540" role="img" aria-labelledby="t d" font-family="Inter, 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <title id="t">Four interfaces, one DocMax engine</title>
+  <desc id="d">The command line, terminal app, AI assistants over MCP and the HTTP API all call the same engine: a tool registry, an engine router and atomic writes. The router runs the local engine by default or the cloud engine if you opt in.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5b8def"/>
+    </marker>
+    <marker id="arrow-dim" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8b93a7"/>
+    </marker>
+  </defs>
+
+  <rect width="940" height="540" rx="18" fill="#0e1117"/>
+
+  <!-- interfaces -->
+  <text x="40" y="34" fill="#8b93a7" font-size="12" font-weight="600" letter-spacing="1.6">FOUR WAYS IN</text>
+
+  <g font-size="12">
+    <rect x="40" y="48" width="200" height="80" rx="12" fill="#1c2330" stroke="#2dd4bf" stroke-width="1.5"/>
+    <text x="140" y="80" fill="#e6e9ef" font-size="16" font-weight="700" text-anchor="middle">Command line</text>
+    <text x="140" y="104" fill="#8b93a7" text-anchor="middle">scripts · CI · cron · --json</text>
+
+    <rect x="260" y="48" width="200" height="80" rx="12" fill="#1c2330" stroke="#2dd4bf" stroke-width="1.5"/>
+    <text x="360" y="80" fill="#e6e9ef" font-size="16" font-weight="700" text-anchor="middle">Terminal app</text>
+    <text x="360" y="104" fill="#8b93a7" text-anchor="middle">forms · live batch progress</text>
+
+    <rect x="480" y="48" width="200" height="80" rx="12" fill="#1c2330" stroke="#2dd4bf" stroke-width="1.5"/>
+    <text x="580" y="80" fill="#e6e9ef" font-size="16" font-weight="700" text-anchor="middle">AI assistants</text>
+    <text x="580" y="104" fill="#8b93a7" text-anchor="middle">MCP · Claude, Cursor, Cline</text>
+
+    <rect x="700" y="48" width="200" height="80" rx="12" fill="#1c2330" stroke="#2dd4bf" stroke-width="1.5"/>
+    <text x="800" y="80" fill="#e6e9ef" font-size="16" font-weight="700" text-anchor="middle">HTTP API</text>
+    <text x="800" y="104" fill="#8b93a7" text-anchor="middle">self-hosted server</text>
+  </g>
+
+  <!-- arrows in -->
+  <g stroke="#5b8def" stroke-width="2" fill="none" marker-end="url(#arrow)">
+    <path d="M140 130 V204"/>
+    <path d="M360 130 V204"/>
+    <path d="M580 130 V204"/>
+    <path d="M800 130 V204"/>
+  </g>
+  <text x="470" y="176" fill="#8b93a7" font-size="12" text-anchor="middle" font-style="italic">generated from the same tool declarations, so they never drift</text>
+
+  <!-- engine -->
+  <rect x="40" y="212" width="860" height="170" rx="16" fill="#151a23" stroke="#5b8def" stroke-width="2"/>
+  <text x="62" y="240" fill="#5b8def" font-size="12" font-weight="700" letter-spacing="1.6">ONE DOCMAX ENGINE</text>
+
+  <g font-size="12">
+    <rect x="62" y="258" width="262" height="100" rx="10" fill="#1c2330"/>
+    <text x="193" y="290" fill="#e6e9ef" font-size="15" font-weight="700" text-anchor="middle">Tool registry</text>
+    <text x="193" y="314" fill="#8b93a7" text-anchor="middle">every tool declared once</text>
+    <text x="193" y="332" fill="#8b93a7" text-anchor="middle">merge · compress · ocr · protect …</text>
+
+    <rect x="339" y="258" width="262" height="100" rx="10" fill="#1c2330"/>
+    <text x="470" y="290" fill="#e6e9ef" font-size="15" font-weight="700" text-anchor="middle">Engine router</text>
+    <text x="470" y="314" fill="#8b93a7" text-anchor="middle">one code path picks local or cloud</text>
+    <text x="470" y="332" fill="#8b93a7" text-anchor="middle">consent checked before any upload</text>
+
+    <rect x="616" y="258" width="262" height="100" rx="10" fill="#1c2330"/>
+    <text x="747" y="290" fill="#e6e9ef" font-size="15" font-weight="700" text-anchor="middle">Safe writes</text>
+    <text x="747" y="314" fill="#8b93a7" text-anchor="middle">stage, validate, atomic swap</text>
+    <text x="747" y="332" fill="#8b93a7" text-anchor="middle">never half-written, no silent overwrite</text>
+  </g>
+  <g stroke="#8b93a7" stroke-width="1.5" fill="none" marker-end="url(#arrow-dim)">
+    <path d="M325 308 H337"/>
+    <path d="M602 308 H614"/>
+  </g>
+
+  <!-- engines out -->
+  <g stroke="#5b8def" stroke-width="2" fill="none" marker-end="url(#arrow)">
+    <path d="M440 360 L440 384 Q440 400 400 408 L330 420"/>
+    <path d="M500 360 L500 384 Q500 400 540 408 L640 420"/>
+  </g>
+
+  <g font-size="12">
+    <rect x="150" y="424" width="360" height="82" rx="12" fill="#1c2330" stroke="#4ade80" stroke-width="1.5"/>
+    <text x="330" y="452" fill="#e6e9ef" font-size="15" font-weight="700" text-anchor="middle">Local engine · default</text>
+    <text x="330" y="474" fill="#8b93a7" text-anchor="middle">runs on your machine, works offline</text>
+    <text x="330" y="492" fill="#8b93a7" text-anchor="middle">PyMuPDF · pypdf · Tesseract · Pandoc</text>
+
+    <rect x="530" y="424" width="260" height="82" rx="12" fill="#1c2330" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <text x="660" y="452" fill="#e6e9ef" font-size="15" font-weight="700" text-anchor="middle">Cloud engine · opt-in</text>
+    <text x="660" y="474" fill="#8b93a7" text-anchor="middle">only with your consent, per tool</text>
+    <text x="660" y="492" fill="#8b93a7" text-anchor="middle">off entirely with offline = true</text>
+  </g>
+</svg>

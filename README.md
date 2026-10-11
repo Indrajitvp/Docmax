@@ -31,17 +31,16 @@ One `pip install`. No Ghostscript, no Poppler, no Docker, no upload.
 
 ---
 
-## One engine, three front doors
+## One engine, four ways in
 
-Every tool is written once and exposed everywhere, so the three ways in always behave the same.
+Every tool is declared once. The command line, the terminal app, AI assistants over MCP and the
+HTTP API are all generated from that declaration, so they run the same code and can't drift apart.
 
-| | **AI assistant (MCP)** | **Terminal app (TUI)** | **Command line** |
-|---|---|---|---|
-| Best for | "Merge these and email-size them" in plain English | Browsing tools, filling forms, watching batches run | Scripts, CI, cron, pipelines |
-| How | `docmax mcp connect` | `docmax tui` | `docmax merge a.pdf b.pdf -o out.pdf` |
-| Works with | Claude Desktop, Claude Code, Cursor, Cline | Any terminal, SSH included | Anything that can run a process |
+<div align="center">
+  <img src="docs/assets/architecture.svg" alt="The command line, terminal app, MCP and HTTP API all feed a single DocMax engine made of a tool registry, an engine router and safe writes, which runs the local engine by default or the cloud engine if you opt in" width="860">
+</div>
 
-And the same promises hold in all three:
+What that buys you, whichever door you use:
 
 - **Private by default.** Everything runs on your machine. Nothing is uploaded unless you opt in, per tool.
 - **Safe by construction.** Output is staged, checked, then swapped into place atomically. A crash never leaves a half-written PDF.
