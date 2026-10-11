@@ -17,6 +17,7 @@ No Ghostscript. No Poppler. No Docker. No upload.
 
 <p>
   <a href="#-quick-start">Quick start</a> ·
+  <a href="#-prefer-a-full-screen-interface">TUI</a> ·
   <a href="#-what-you-can-do">Tools</a> ·
   <a href="#-use-it-from-an-ai-assistant-mcp">AI / MCP</a> ·
   <a href="#-automate-everything">Automation</a> ·
@@ -65,10 +66,29 @@ docmax watermark smaller.pdf -o final.pdf --text "CONFIDENTIAL"
 docmax ocr scan.pdf -o searchable.pdf --lang eng+fra
 
 # Prefer a full-screen interface? Just run:
-docmax
+docmax tui
 ```
 
 Run `docmax doctor` any time to see what is built in and what is optional on your machine.
+
+## 🖥️ Prefer a full-screen interface?
+
+Don't remember the flags? Open the terminal UI, search for a tool, and fill in a form. It runs
+the same engines as the CLI, so results are identical.
+
+<div align="center">
+  <img src="docs/assets/tui.gif" alt="The DocMax terminal UI: filtering tools by typing, then opening the compress form" width="760">
+</div>
+
+```bash
+pip install "Docmax[tui]"
+docmax tui
+```
+
+- **Type to search.** The tool list filters as you type, and each tool shows what it takes and produces.
+- **Forms, not flags.** Pick a tool, fill in the fields, and run it, with a **Browse…** button for paths.
+- **Batch built in.** Press `b` to run one tool over many documents.
+- **Works over SSH.** No browser and no display server needed.
 
 ## 🛡️ It refuses to destroy your files
 
