@@ -39,6 +39,12 @@ and rebuilds everything underneath it.
 - Taller header; the tool preview shows aligned, styled facts. Widget ids and classes are
   unchanged.
 
+### Changed — one install
+
+- `pip install Docmax` now includes the TUI (`textual`), image tools (Pillow, img2pdf),
+  encryption (`cryptography`) and OCR deskew (OpenCV, numpy). `Docmax[tui]` and the other
+  extras still work. `remove-bg`, `tables`, `server` and `mcp` remain optional.
+
 ### Breaking
 
 These are behaviour changes a v2 user can actually hit. See

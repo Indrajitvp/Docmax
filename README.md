@@ -81,7 +81,7 @@ the same engines as the CLI, so results are identical.
 </div>
 
 ```bash
-pip install "Docmax[tui]"
+pip install Docmax
 docmax tui
 ```
 
@@ -169,19 +169,17 @@ Run `docmax --help` for the full list, or `docmax formats` to see what each tool
 
 ### What needs extra installs?
 
-The base install covers `merge`, `split`, `compress`, `to-images` and Markdown/HTML `convert`.
-Everything else is opt-in so you only install what you use:
+`pip install Docmax` includes the CLI, the TUI, the image tools, AES encryption and OCR
+deskewing. Only the heavy or niche pieces are opt-in:
 
 ```bash
-pip install "Docmax[tui]"        # full-screen terminal interface
-pip install "Docmax[crypto]"     # AES-256 for protect / unlock
-pip install "Docmax[ocr]"        # deskewing for scans
-pip install "Docmax[images]"     # image tools, from-images
 pip install "Docmax[tables]"     # table extraction
 pip install "Docmax[remove-bg]"  # background removal
 pip install "Docmax[mcp]"        # AI assistant server
 pip install "Docmax[all]"        # everything above except mcp and server
 ```
+
+(`Docmax[tui]`, `[images]`, `[crypto]` and `[ocr]` still work; they are already included.)
 
 Two optional programs add capability. Both have a cloud fallback via `--engine cloud`:
 
