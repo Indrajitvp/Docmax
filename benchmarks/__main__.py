@@ -77,7 +77,7 @@ def _local(fixtures: list[Fixture], out: Path) -> list[Measurement]:
 
     for fixture in fixtures:
         for tool, binary, params in _plan(fixture):
-            if _binaries.find(binary) is None:
+            if binary is not None and _binaries.find(binary) is None:
                 results.append(skipped(tool, "local", fixture, f"{binary} is not installed"))
                 continue
             results.append(
@@ -92,11 +92,16 @@ def _local(fixtures: list[Fixture], out: Path) -> list[Measurement]:
     return results
 
 
-def _plan(fixture: Fixture) -> list[tuple[str, str, dict[str, Any]]]:
-    """Which tools apply to this fixture, and with what parameters."""
+def _plan(fixture: Fixture) -> list[tuple[str, str | None, dict[str, Any]]]:
+    """Which tools apply to this fixture, with what parameters, and what binary.
+
+    The binary is ``None`` for both: Markdown to HTML and compression run on the
+    built-in engines, so there is nothing to be absent. A plan entry that does
+    name a binary gets a "not installed" row instead of a missing one.
+    """
     if fixture.kind == "markdown":
-        return [("convert", "pandoc", {"to": "html"})]
-    return [("compress", "gs", {"preset": "ebook"})]
+        return [("convert", None, {"to": "html"})]
+    return [("compress", None, {"preset": "ebook"})]
 
 
 def _suffix(tool: str, params: dict[str, Any]) -> str:
@@ -144,7 +149,7 @@ def _cloud(fixtures: list[Fixture], out: Path) -> list[Measurement]:
     with _reference_server():
         for fixture in fixtures:
             for tool, binary, params in _plan(fixture):
-                if _binaries.find(binary) is None:
+                if binary is not None and _binaries.find(binary) is None:
                     # The server runs the *local* engine, so a missing binary
                     # means the endpoint cannot do it either.
                     results.append(

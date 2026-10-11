@@ -4,7 +4,7 @@ Never lets a test hit a real package manager or a real ``pip install`` — every
 test that reaches the "actually run something" path fakes
 ``_install.install_binary`` / ``_install.install_pip_extra`` instead, the same
 way `test_cli_compress.py` fakes `_binaries.find` rather than uninstalling
-Ghostscript to test the missing-binary path.
+Tesseract to test the missing-binary path.
 """
 
 from __future__ import annotations
@@ -60,8 +60,8 @@ def isolated_json_state() -> Any:
 
 
 @pytest.fixture
-def gs_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`compress` needs only `gs`; report it absent regardless of the real machine."""
+def tesseract_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ocr` needs only `tesseract`; report it absent regardless of the real machine."""
     monkeypatch.setattr(_binaries, "find", lambda name: None)
 
 
@@ -116,37 +116,37 @@ def test_nothing_missing_installs_nothing(no_subprocess: Any) -> None:
 
 
 def test_dry_run_shows_the_plan_and_starts_no_subprocess(
-    gs_missing: None, a_manager_is_on_path: None, no_subprocess: Any
+    tesseract_missing: None, a_manager_is_on_path: None, no_subprocess: Any
 ) -> None:
-    result = runner.invoke(app, ["setup", "compress", "--dry-run"])
+    result = runner.invoke(app, ["setup", "ocr", "--dry-run"])
 
     text = shown(result)
     assert result.exit_code == 0
-    assert "gs" in text
-    assert "compress" in text
+    assert "tesseract" in text
+    assert "ocr" in text
     assert not no_subprocess, "dry-run must never start a real installer"
 
 
-def test_dry_run_as_json(gs_missing: None, a_manager_is_on_path: None) -> None:
-    body = parsed(runner.invoke(app, ["--json", "setup", "compress", "--dry-run"]))
+def test_dry_run_as_json(tesseract_missing: None, a_manager_is_on_path: None) -> None:
+    body = parsed(runner.invoke(app, ["--json", "setup", "ocr", "--dry-run"]))
 
     items = body["result"]["items"]
     assert len(items) == 1
-    assert items[0]["name"] == "gs"
-    assert items[0]["used_by"] == ["compress"]
+    assert items[0]["name"] == "tesseract"
+    assert items[0]["used_by"] == ["ocr"]
     assert items[0]["command"][0] == "apt-get"
 
 
 def test_dry_run_without_a_package_manager_shows_the_fallback_hint(
-    gs_missing: None, no_manager_on_path: None, monkeypatch: pytest.MonkeyPatch
+    tesseract_missing: None, no_manager_on_path: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The exact copy-pasteable line `doctor` already prints for this binary."""
     monkeypatch.setattr(_binaries, "_platform_key", lambda: "linux")
 
-    result = runner.invoke(app, ["setup", "compress", "--dry-run"])
+    result = runner.invoke(app, ["setup", "ocr", "--dry-run"])
 
     assert result.exit_code == 0
-    assert "apt-get install -y ghostscript" in shown(result)
+    assert "apt-get install -y tesseract-ocr" in shown(result)
 
 
 # ---------------------------------------------------------------------------
@@ -155,19 +155,19 @@ def test_dry_run_without_a_package_manager_shows_the_fallback_hint(
 
 
 def test_refuses_to_install_without_yes_when_not_interactive(
-    gs_missing: None, a_manager_is_on_path: None, no_subprocess: Any
+    tesseract_missing: None, a_manager_is_on_path: None, no_subprocess: Any
 ) -> None:
     """`CliRunner` is never a tty; `setup` must not hang waiting for a prompt."""
-    result = runner.invoke(app, ["setup", "compress"])
+    result = runner.invoke(app, ["setup", "ocr"])
 
     assert result.exit_code == EXIT_FAILURE
     assert not no_subprocess, "refusing must not run anything either"
 
 
 def test_no_manager_and_nothing_runnable_fails_without_prompting(
-    gs_missing: None, no_manager_on_path: None, no_subprocess: Any
+    tesseract_missing: None, no_manager_on_path: None, no_subprocess: Any
 ) -> None:
-    result = runner.invoke(app, ["setup", "compress", "--yes"])
+    result = runner.invoke(app, ["setup", "ocr", "--yes"])
 
     assert result.exit_code == EXIT_FAILURE
     assert not no_subprocess
@@ -179,52 +179,87 @@ def test_no_manager_and_nothing_runnable_fails_without_prompting(
 
 
 def test_yes_runs_and_reports_a_verified_binary_install(
-    gs_missing: None, a_manager_is_on_path: None, monkeypatch: pytest.MonkeyPatch
+    tesseract_missing: None, a_manager_is_on_path: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[tuple[str, str]] = []
 
     def fake_install_binary(binary: Any, manager: str, **kwargs: Any) -> _install.InstallResult:
         calls.append((binary.name, manager))
-        return _install.InstallResult(ok=True, verified=True, command=("gs",), stdout_tail="")
+        return _install.InstallResult(
+            ok=True, verified=True, command=("tesseract",), stdout_tail=""
+        )
 
     monkeypatch.setattr(_install, "install_binary", fake_install_binary)
 
-    result = runner.invoke(app, ["setup", "compress", "--yes"])
+    result = runner.invoke(app, ["setup", "ocr", "--yes"])
 
     assert result.exit_code == 0
-    assert calls == [("gs", "apt-get")]
+    assert calls == [("tesseract", "apt-get")]
     assert "installed" in shown(result)
 
 
 def test_a_failed_install_exits_non_zero(
-    gs_missing: None, a_manager_is_on_path: None, monkeypatch: pytest.MonkeyPatch
+    tesseract_missing: None, a_manager_is_on_path: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def fake_install_binary(binary: Any, manager: str, **kwargs: Any) -> _install.InstallResult:
-        return _install.InstallResult(ok=False, verified=False, command=("gs",), stdout_tail="boom")
+        return _install.InstallResult(
+            ok=False, verified=False, command=("tesseract",), stdout_tail="boom"
+        )
 
     monkeypatch.setattr(_install, "install_binary", fake_install_binary)
 
-    result = runner.invoke(app, ["setup", "compress", "--yes"])
+    result = runner.invoke(app, ["setup", "ocr", "--yes"])
 
     assert result.exit_code == EXIT_FAILURE
     assert "failed" in shown(result)
 
 
 def test_yes_as_json_reports_verification_not_just_exit_code(
-    gs_missing: None, a_manager_is_on_path: None, monkeypatch: pytest.MonkeyPatch
+    tesseract_missing: None, a_manager_is_on_path: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A package manager exiting 0 having done nothing must not read as success."""
 
     def fake_install_binary(binary: Any, manager: str, **kwargs: Any) -> _install.InstallResult:
-        return _install.InstallResult(ok=True, verified=False, command=("gs",), stdout_tail="")
+        return _install.InstallResult(
+            ok=True, verified=False, command=("tesseract",), stdout_tail=""
+        )
 
     monkeypatch.setattr(_install, "install_binary", fake_install_binary)
 
-    body = parsed(runner.invoke(app, ["--json", "setup", "compress", "--yes"]))
+    body = parsed(runner.invoke(app, ["--json", "setup", "ocr", "--yes"]))
 
     item = body["result"]["items"][0]
     assert item["installed"] is True
     assert item["verified"] is False
+
+
+# ---------------------------------------------------------------------------
+# Built-in engines need nothing; Pandoc is opt-in
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool", ["compress", "to-images"])
+def test_builtin_tools_have_nothing_to_set_up(
+    tool: str, tesseract_missing: None, a_manager_is_on_path: None, no_subprocess: Any
+) -> None:
+    """Ghostscript and Poppler used to be installed here. They are not needed now."""
+    result = runner.invoke(app, ["setup", tool])
+
+    assert result.exit_code == 0
+    assert "Nothing missing" in shown(result)
+    assert not no_subprocess
+
+
+def test_pandoc_is_offered_only_when_convert_is_named(
+    monkeypatch: pytest.MonkeyPatch, a_manager_is_on_path: None
+) -> None:
+    monkeypatch.setattr(_binaries, "find", lambda name: None)
+
+    named = parsed(runner.invoke(app, ["--json", "setup", "convert", "--dry-run"]))
+    bare = parsed(runner.invoke(app, ["--json", "setup", "--dry-run"]))
+
+    assert [item["name"] for item in named["result"]["items"]] == ["pandoc"]
+    assert "pandoc" not in [item["name"] for item in bare["result"]["items"]]
 
 
 # ---------------------------------------------------------------------------

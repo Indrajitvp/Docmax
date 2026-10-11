@@ -10,6 +10,25 @@ structurally unable to grow — no tests, no atomic writes, no typed errors, and
 a single-engine design with hardcoded dispatch. v3 keeps the command surface
 and rebuilds everything underneath it.
 
+### Changed — zero system binaries for the core tools
+
+- **`to-images`, `compress` and Markdown/HTML `convert` no longer need Poppler,
+  Ghostscript or Pandoc.** They run in-process on PyMuPDF and `markdown`, which are
+  now base dependencies (`tools/_engines/`, [ADR 0041](docs/adr/0041-core-engines-are-built-in.md)).
+  A fresh `pip install Docmax` runs them with nothing else on the machine.
+- `ocr` rasterises with PyMuPDF instead of `pdftoppm`; **Tesseract is still required**
+  for local recognition (use `--engine cloud` without it).
+- `convert` keeps Pandoc for Word, ODT, EPUB, LaTeX and reStructuredText, and reports
+  it as optional. `ToolSpec.optional_binaries` and `Binary.optional_for` record that.
+- `doctor` leads with "Core engines: built in" and lists only Tesseract and Pandoc.
+  `setup` no longer installs Ghostscript or Poppler; Pandoc is offered only for
+  `setup convert`.
+- **`compress` output differs from Ghostscript's.** Presets keep their names but
+  mean PyMuPDF image resampling plus structural clean-up; it does not subset fonts, so
+  text-only PDFs shrink less. The result reports real byte counts.
+- Cancelling `compress` mid-run now takes effect when the in-process work returns,
+  rather than killing a subprocess; nothing is written either way.
+
 ### Breaking
 
 These are behaviour changes a v2 user can actually hit. See

@@ -1,7 +1,7 @@
 """Finding and running the external programs some engines need.
 
-Four tools eventually shell out — Ghostscript, Tesseract, Pandoc, Poppler — and
-they all need the same three things: locate the binary, refuse helpfully when it
+Two programs are still shelled out to — Tesseract and (optionally) Pandoc — and
+they need the same three things: locate the binary, refuse helpfully when it
 is absent, and run it with a timeout that cannot be forgotten. Written once here.
 
 **Where this lives, and why.** The mapping used to sit in ``cli/main.py``, where
@@ -51,6 +51,9 @@ class Binary:
     name: str
     #: Tools that cannot run their local engine without it.
     used_by: tuple[str, ...]
+    #: Tools that run without it but do more with it. Kept apart from
+    #: ``used_by`` so nothing reports a working install as broken.
+    optional_for: tuple[str, ...] = ()
     #: Every command name to try, in order. Ghostscript is the reason this is a
     #: list rather than a string: the console executable is ``gswin64c`` on
     #: Windows and ``gs`` everywhere else, so looking only for ``gs`` would
@@ -76,6 +79,10 @@ class Binary:
     #: package manager. Being roughly right is the whole job; a live query
     #: would cost a network round trip before the button could even render.
     size_hint: str = ""
+
+    def needed_by_labels(self) -> tuple[str, ...]:
+        """``used_by`` followed by ``optional_for`` marked as such, for display."""
+        return (*self.used_by, *(f"{tool} (optional)" for tool in self.optional_for))
 
     def candidates(self) -> tuple[str, ...]:
         return self.commands or (self.name,)
@@ -107,26 +114,13 @@ class Binary:
         return argv
 
 
-#: Every external program DocMax knows about, and which tools want it.
+#: Every external program DocMax can use, and which tools want it.
 #:
-#: Only ``gs`` is reachable today; the rest are declared because ``doctor``
-#: reports on them and has since M0, and because a list that grows tool by tool
-#: is a list that gets out of step with the roadmap.
+#: Ghostscript and Poppler used to be here. Rendering, compression and the
+#: simple conversions are built in now (``tools/_engines/``), so the only
+#: programs left are the ones with no pure-Python equivalent: Tesseract, which
+#: OCR cannot run without, and Pandoc, which only widens ``convert``.
 EXTERNAL_BINARIES: tuple[Binary, ...] = (
-    Binary(
-        name="gs",
-        used_by=("compress", "pdfa"),
-        # gswin64c/gswin32c are the *console* builds. The bare `gswin64` opens a
-        # window and never returns, which would hang a batch run.
-        commands=("gs", "gswin64c", "gswin32c"),
-        install_argv={
-            "linux": ("apt-get", "install", "-y", "ghostscript"),
-            "macos": ("brew", "install", "ghostscript"),
-            "windows": ("winget", "install", "--id", "ArtifexSoftware.GhostScript", "-e"),
-        },
-        homepage="https://ghostscript.com/releases/gsdnld.html",
-        size_hint="~50 MB",
-    ),
     Binary(
         name="tesseract",
         used_by=("ocr",),
@@ -139,19 +133,9 @@ EXTERNAL_BINARIES: tuple[Binary, ...] = (
         size_hint="~50 MB (plus language data)",
     ),
     Binary(
-        name="pdftoppm",
-        used_by=("ocr", "to-images"),
-        install_argv={
-            "linux": ("apt-get", "install", "-y", "poppler-utils"),
-            "macos": ("brew", "install", "poppler"),
-            "windows": ("winget", "install", "--id", "oschwartz10612.Poppler", "-e"),
-        },
-        homepage="https://poppler.freedesktop.org/",
-        size_hint="~15 MB",
-    ),
-    Binary(
         name="pandoc",
-        used_by=("convert",),
+        used_by=(),
+        optional_for=("convert",),
         install_argv={
             "linux": ("apt-get", "install", "-y", "pandoc"),
             "macos": ("brew", "install", "pandoc"),

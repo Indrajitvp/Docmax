@@ -1,24 +1,20 @@
-"""`compress` — the first tool whose engine is another program.
+"""`compress` -- PDF compression with the built-in PyMuPDF engine.
 
-Ghostscript is not installed on most development machines and is not a Python
-dependency, so this is split deliberately:
+Two layers, deliberately:
 
-* **Everything about the tool's behaviour** is tested with a fake Ghostscript —
-  a real subprocess that writes a real PDF, so `atomic_path`, the validators and
-  the error mapping are all genuinely exercised.
-* **Real compression** is one test, marked `needs_binary`, skipped where
-  Ghostscript is absent and required in CI.
-
-The fake matters more than it sounds. What is being checked is not "does
-Ghostscript work" — that is Artifex's problem — but "does DocMax behave when it
-fails, hangs, lies about success, or is cancelled", and a real Ghostscript makes
-those cases hard to produce on demand.
+* **Behaviour around the engine** -- atomic output, validators, error mapping,
+  progress, cancellation -- is tested by swapping `compressor.compress_pdf` for a
+  stand-in that copies, lies, or breaks. What is being checked is not "does
+  PyMuPDF compress" -- that is Artifex's problem -- but "does DocMax behave when
+  the engine writes nothing, loses pages, or is cancelled", and a real engine
+  makes those cases hard to produce on demand.
+* **Real compression** runs the real engine on a PDF with a large image in it,
+  because a test that only ever uses a fake would pass with a broken engine.
+  There is no skip: PyMuPDF is a base dependency.
 """
 
 from __future__ import annotations
 
-import shutil
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -29,9 +25,7 @@ from docmax.core.config import Config
 from docmax.core.errors import (
     CancelledError,
     CorruptDocumentError,
-    ExternalToolFailedError,
     InvalidParameterError,
-    NoEngineAvailableError,
     OutputValidationError,
     UnsupportedFormatError,
 )
@@ -39,16 +33,14 @@ from docmax.core.models import DocumentRef, Engine, OutputTarget
 from docmax.core.protocols import NULL_PROGRESS
 from docmax.core.registry import get_tool
 from docmax.core.router import EngineRouter
-from docmax.tools import _binaries
+from docmax.tools._engines import compressor
+from docmax.tools.compress.tool import PRESETS
 from docmax.tools.compress.validators import is_readable_pdf, page_count_is
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from docmax.core.models import ToolResult
-
-#: Skips locally, required in CI — the convention pyproject.toml documents.
-needs_ghostscript = pytest.mark.needs_binary("gs")
-
-GHOSTSCRIPT_PRESENT = _binaries.find("gs") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +59,25 @@ def write_pdf(path: Path, pages: int = 3) -> Path:
     return path
 
 
+def write_image_pdf(path: Path) -> Path:
+    """A one-page PDF carrying a large, high-resolution, noisy photo-like image."""
+    import random
+
+    import pymupdf
+
+    rng = random.Random(7)
+    width = height = 1200
+    samples = bytes(rng.randrange(256) for _ in range(width * height * 3))
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, width, height, samples, False)
+
+    document = pymupdf.open()
+    page = document.new_page(width=300, height=300)
+    page.insert_image(page.rect, pixmap=pixmap)
+    document.save(str(path))
+    document.close()
+    return path
+
+
 def page_count(path: Path) -> int:
     from pypdf import PdfReader
 
@@ -77,40 +88,19 @@ def staged(directory: Path) -> list[str]:
     return sorted(p.name for p in directory.glob(".*"))
 
 
-def fake_ghostscript(tmp_path: Path, body: str) -> Path:
-    """A stand-in for `gs`: a real program, so the subprocess path is real.
+def install_engine(
+    monkeypatch: pytest.MonkeyPatch, body: Callable[[Path, Path, str], None]
+) -> None:
+    """Replace the engine with `body(source, destination, preset)`."""
 
-    ``body`` runs with ``out`` bound to the ``-sOutputFile=`` value and ``src``
-    to the input, which is enough to imitate every way Ghostscript can behave —
-    including the ways it misbehaves.
-    """
-    script = tmp_path / "fake_gs.py"
-    script.write_text(
-        "import sys\n"
-        "args = sys.argv[1:]\n"
-        "out = next(a.split('=', 1)[1] for a in args if a.startswith('-sOutputFile='))\n"
-        "src = args[-1]\n" + body,
-        encoding="utf-8",
-    )
-    return script
+    def fake(source: Path, destination: Path, *, preset: str) -> None:
+        body(source, destination, preset)
+
+    monkeypatch.setattr(compressor, "compress_pdf", fake)
 
 
-def install_fake(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> None:
-    """Point `compress` at the fake, through the real binary mechanism."""
-    script = fake_ghostscript(tmp_path, body)
-    real_run = _binaries.run
-
-    def run_fake(command: Any, **kwargs: Any) -> Any:
-        # Swap only the executable; every other argument is the one compress
-        # actually built, so the flags are exercised as written.
-        return real_run([sys.executable, str(script), *[str(c) for c in command[1:]]], **kwargs)
-
-    monkeypatch.setattr(_binaries, "find", lambda name: sys.executable)
-    monkeypatch.setattr(_binaries, "require", lambda name, *, tool: sys.executable)
-    monkeypatch.setattr(_binaries, "run", run_fake)
-
-
-COPIES_INPUT = "import shutil; shutil.copyfile(src, out)\n"
+def copies_input(source: Path, destination: Path, preset: str) -> None:
+    destination.write_bytes(source.read_bytes())
 
 
 @pytest.fixture
@@ -156,18 +146,16 @@ def test_compress_is_discoverable() -> None:
 
 
 def test_compress_has_both_engines() -> None:
-    """Since M6. Installing Ghostscript is exactly the pain cloud exists to remove.
-
-    Was `test_compress_has_no_cloud_engine_yet` until the engine existed. The
-    condition M3 set for declaring it has not been relaxed, only met: the
-    strategy loads and reports its own availability, which is asserted here
-    rather than taken on trust.
-    """
     spec = get_tool("compress")
 
     assert spec.supports(Engine.LOCAL)
     assert spec.supports(Engine.CLOUD)
     assert spec.load_strategy(Engine.CLOUD) is not None
+
+
+def test_compress_needs_no_external_binary() -> None:
+    """The point of the built-in engine: nothing for `setup` to install."""
+    assert get_tool("compress").requires_binaries == ()
 
 
 def test_the_router_loads_the_local_strategy() -> None:
@@ -176,59 +164,42 @@ def test_the_router_loads_the_local_strategy() -> None:
     assert isinstance(get_tool("compress").load_strategy(Engine.LOCAL), CompressLocal)
 
 
+def test_every_preset_has_a_profile() -> None:
+    """`PRESETS` (the CLI's choices) and `PROFILES` (the engine) must not drift."""
+    assert set(PRESETS) == set(compressor.PROFILES)
+
+
 # ---------------------------------------------------------------------------
-# Ghostscript availability
+# Availability
 # ---------------------------------------------------------------------------
 
 
-def test_availability_follows_the_shared_binary_mechanism(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_availability_follows_pymupdf(monkeypatch: pytest.MonkeyPatch) -> None:
+    from docmax.tools import _engines
     from docmax.tools.compress.local import CompressLocal
 
     strategy = CompressLocal()
-    monkeypatch.setattr(_binaries, "find", lambda name: None)
-    assert strategy.is_available() is False
-
-    monkeypatch.setattr(_binaries, "find", lambda name: "/usr/bin/gs")
     assert strategy.is_available() is True
+    assert strategy.unavailable_reason() is None
 
+    monkeypatch.setattr(_engines, "has_pymupdf", lambda: False)
+    monkeypatch.setattr("docmax.tools.compress.local.has_pymupdf", lambda: False)
 
-def test_the_unavailable_reason_tells_the_user_what_to_type(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The router's own remedy can only be generic; it does not know what gs is."""
-    from docmax.tools.compress.local import CompressLocal
-
-    monkeypatch.setattr(_binaries, "find", lambda name: None)
-
-    reason = CompressLocal().unavailable_reason()
-
+    assert strategy.is_available() is False
+    reason = strategy.unavailable_reason()
     assert reason is not None
-    assert "Ghostscript" in reason
-    assert "install" in reason.lower(), "a command to type, not a category of problem"
-
-
-def test_a_missing_ghostscript_is_reported_not_crashed(
-    router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(_binaries, "find", lambda name: None)
-
-    with pytest.raises(NoEngineAvailableError) as caught:
-        run(router, source, tmp_path / "out.pdf")
-
-    assert "Ghostscript" in str(caught.value)
+    assert "PyMuPDF" in reason
 
 
 # ---------------------------------------------------------------------------
-# Behaviour, against a fake Ghostscript
+# Behaviour, against a stand-in engine
 # ---------------------------------------------------------------------------
 
 
 def test_compress_produces_an_output(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, COPIES_INPUT)
+    install_engine(monkeypatch, copies_input)
     out = tmp_path / "small.pdf"
 
     result = run(router, source, out)
@@ -242,7 +213,7 @@ def test_compress_produces_an_output(
 def test_the_result_reports_the_saving(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, COPIES_INPUT)
+    install_engine(monkeypatch, copies_input)
     out = tmp_path / "small.pdf"
 
     result = run(router, source, out)
@@ -259,60 +230,46 @@ def test_a_negative_saving_is_reported_rather_than_hidden(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Compression can make an already-optimised file larger. Say so."""
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        "import shutil; shutil.copyfile(src, out)\n"
-        "open(out, 'ab').write(b'%' + b'padding' * 500)\n",
-    )
-    out = tmp_path / "bigger.pdf"
 
-    result = run(router, source, out)
+    def pads(src: Path, dst: Path, preset: str) -> None:
+        dst.write_bytes(src.read_bytes() + b"%" + b"padding" * 500)
+
+    install_engine(monkeypatch, pads)
+
+    result = run(router, source, tmp_path / "bigger.pdf")
 
     assert result.details["saved_bytes"] < 0
 
 
-@pytest.mark.parametrize("preset", ["screen", "ebook", "printer", "prepress", "default"])
-def test_every_ghostscript_preset_is_accepted(
+@pytest.mark.parametrize("preset", PRESETS)
+def test_every_preset_is_accepted(
     router: EngineRouter,
     source: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     preset: str,
 ) -> None:
-    install_fake(monkeypatch, tmp_path, COPIES_INPUT)
+    install_engine(monkeypatch, copies_input)
 
     result = run(router, source, tmp_path / f"{preset}.pdf", preset=preset)
 
     assert result.details["preset"] == preset
 
 
-def test_the_preset_reaches_ghostscript(
+def test_the_preset_reaches_the_engine(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Passed as Ghostscript's own `-dPDFSETTINGS=/name`, not a DocMax synonym."""
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        "assert '-dPDFSETTINGS=/screen' in args, args\nimport shutil; shutil.copyfile(src, out)\n",
-    )
+    seen: list[str] = []
+
+    def records(src: Path, dst: Path, preset: str) -> None:
+        seen.append(preset)
+        copies_input(src, dst, preset)
+
+    install_engine(monkeypatch, records)
 
     run(router, source, tmp_path / "out.pdf", preset="screen")
 
-
-def test_batch_flags_are_passed(
-    router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Without -dBATCH/-dNOPAUSE Ghostscript waits on stdin, which reads as a hang."""
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        "for flag in ('-dBATCH', '-dNOPAUSE', '-dSAFER'):\n"
-        "    assert flag in args, (flag, args)\n"
-        "import shutil; shutil.copyfile(src, out)\n",
-    )
-
-    run(router, source, tmp_path / "out.pdf")
+    assert seen == ["screen"]
 
 
 @pytest.mark.parametrize("preset", ["tiny", "", "SCREEN!", 5])
@@ -323,7 +280,7 @@ def test_an_unknown_preset_is_refused(
     preset: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    install_fake(monkeypatch, tmp_path, COPIES_INPUT)
+    install_engine(monkeypatch, copies_input)
 
     with pytest.raises(InvalidParameterError) as caught:
         run(router, source, tmp_path / "out.pdf", preset=preset)
@@ -332,30 +289,15 @@ def test_an_unknown_preset_is_refused(
 
 
 # ---------------------------------------------------------------------------
-# When Ghostscript misbehaves
+# When the engine misbehaves
 # ---------------------------------------------------------------------------
 
 
-def test_a_ghostscript_failure_becomes_a_typed_error(
+def test_an_engine_that_writes_nothing_is_caught(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        "import sys; sys.stderr.write('**** Unable to open the initial device'); sys.exit(1)\n",
-    )
-
-    with pytest.raises(ExternalToolFailedError) as caught:
-        run(router, source, tmp_path / "out.pdf")
-
-    assert "Unable to open the initial device" in str(caught.value)
-
-
-def test_ghostscript_exiting_zero_with_no_output_is_caught(
-    router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """It genuinely does this. Delivering nothing as success would be worse."""
-    install_fake(monkeypatch, tmp_path, "pass\n")
+    """Delivering nothing as success would be worse than failing."""
+    install_engine(monkeypatch, lambda src, dst, preset: None)
 
     with pytest.raises(OutputValidationError):
         run(router, source, tmp_path / "out.pdf")
@@ -364,7 +306,7 @@ def test_ghostscript_exiting_zero_with_no_output_is_caught(
 def test_an_empty_output_is_caught(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, "open(out, 'wb').close()\n")
+    install_engine(monkeypatch, lambda src, dst, preset: dst.write_bytes(b""))
 
     with pytest.raises(OutputValidationError):
         run(router, source, tmp_path / "out.pdf")
@@ -374,14 +316,11 @@ def test_losing_pages_is_caught(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The failure a user would be least likely to notice: smaller, and wrong."""
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        "from pypdf import PdfReader, PdfWriter\n"
-        "w = PdfWriter(); w.add_page(PdfReader(src).pages[0])\n"
-        "open(out, 'wb').close()\n"
-        "with open(out, 'wb') as fh: w.write(fh)\n",
-    )
+
+    def keeps_one_page(src: Path, dst: Path, preset: str) -> None:
+        write_pdf(dst, 1)
+
+    install_engine(monkeypatch, keeps_one_page)
 
     with pytest.raises(OutputValidationError) as caught:
         run(router, source, tmp_path / "out.pdf")
@@ -393,25 +332,28 @@ def test_losing_pages_is_caught(
 def test_garbage_output_is_caught(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, "open(out, 'wb').write(b'not a pdf')\n")
+    install_engine(monkeypatch, lambda src, dst, preset: dst.write_bytes(b"not a pdf"))
 
     with pytest.raises(OutputValidationError):
         run(router, source, tmp_path / "out.pdf")
 
 
 # ---------------------------------------------------------------------------
-# Atomic output — the first consumer of atomic_path
+# Atomic output
 # ---------------------------------------------------------------------------
 
 
 def test_a_failure_leaves_the_previous_output_untouched(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, "import sys; sys.exit(1)\n")
+    def fails(src: Path, dst: Path, preset: str) -> None:
+        raise CorruptDocumentError("engine blew up")
+
+    install_engine(monkeypatch, fails)
     out = tmp_path / "out.pdf"
     out.write_bytes(b"a previous run's output")
 
-    with pytest.raises(ExternalToolFailedError):
+    with pytest.raises(CorruptDocumentError):
         run(router, source, out)
 
     assert out.read_bytes() == b"a previous run's output"
@@ -421,10 +363,13 @@ def test_a_failure_leaves_the_previous_output_untouched(
 def test_a_failure_creates_no_output_at_all(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, "import sys; sys.exit(1)\n")
+    def fails(src: Path, dst: Path, preset: str) -> None:
+        raise CorruptDocumentError("engine blew up")
+
+    install_engine(monkeypatch, fails)
     out = tmp_path / "out.pdf"
 
-    with pytest.raises(ExternalToolFailedError):
+    with pytest.raises(CorruptDocumentError):
         run(router, source, out)
 
     assert not out.exists()
@@ -435,7 +380,7 @@ def test_a_rejected_output_leaves_nothing_behind(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Validators run against the staged file, so a bad result is never delivered."""
-    install_fake(monkeypatch, tmp_path, "open(out, 'wb').write(b'not a pdf')\n")
+    install_engine(monkeypatch, lambda src, dst, preset: dst.write_bytes(b"not a pdf"))
     out = tmp_path / "out.pdf"
     out.write_bytes(b"the original")
 
@@ -449,7 +394,7 @@ def test_a_rejected_output_leaves_nothing_behind(
 def test_no_staged_file_survives_success(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, COPIES_INPUT)
+    install_engine(monkeypatch, copies_input)
 
     run(router, source, tmp_path / "out.pdf")
 
@@ -461,15 +406,13 @@ def test_no_staged_file_survives_success(
 # ---------------------------------------------------------------------------
 
 
-def test_a_non_pdf_is_refused_before_ghostscript_is_invoked(
+def test_a_non_pdf_is_refused_before_the_engine_runs(
     router: EngineRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The input is checked before the binary runs, so nothing is launched in vain."""
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        "raise AssertionError('ghostscript should not have run')\n",
-    )
+    def must_not_run(src: Path, dst: Path, preset: str) -> None:
+        raise AssertionError("the engine should not have run")
+
+    install_engine(monkeypatch, must_not_run)
     notes = tmp_path / "notes.txt"
     notes.write_text("not a pdf", encoding="utf-8")
 
@@ -477,27 +420,10 @@ def test_a_non_pdf_is_refused_before_ghostscript_is_invoked(
         run(router, notes, tmp_path / "out.pdf")
 
 
-def test_a_missing_engine_outranks_a_bad_argument(
-    router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With Ghostscript absent, every compress failure is "Ghostscript is absent".
-
-    The router resolves an engine before the tool sees anything, so a typo'd
-    `--preset` on a machine without Ghostscript reports the missing binary. That
-    is the right order — there is no point correcting an argument for an
-    operation that cannot run either way — but it is worth pinning, because it
-    means tool-level validation is only reachable once the engine is available.
-    """
-    monkeypatch.setattr(_binaries, "find", lambda name: None)
-
-    with pytest.raises(NoEngineAvailableError):
-        run(router, source, tmp_path / "out.pdf", preset="nonsense")
-
-
 def test_a_corrupt_input_is_refused(
     router: EngineRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, COPIES_INPUT)
+    install_engine(monkeypatch, copies_input)
     broken = tmp_path / "broken.pdf"
     broken.write_bytes(b"%PDF-1.7\ngarbage")
 
@@ -508,9 +434,9 @@ def test_a_corrupt_input_is_refused(
 def test_progress_is_reported(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Indeterminate: Ghostscript reports nothing usable, and a made-up percentage
+    """Indeterminate: the engine reports nothing usable, and a made-up percentage
     would be a number the user cannot check."""
-    install_fake(monkeypatch, tmp_path, COPIES_INPUT)
+    install_engine(monkeypatch, copies_input)
     events: list[tuple[str, Any]] = []
 
     class Recording:
@@ -532,7 +458,7 @@ def test_progress_is_reported(
 def test_an_already_cancelled_run_produces_nothing(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, COPIES_INPUT)
+    install_engine(monkeypatch, copies_input)
     out = tmp_path / "out.pdf"
     token = CancellationToken()
     token.cancel()
@@ -544,17 +470,19 @@ def test_an_already_cancelled_run_produces_nothing(
     assert staged(tmp_path) == []
 
 
-def test_cancelling_mid_run_leaves_the_destination_untouched(
+def test_cancelling_during_the_work_leaves_the_destination_untouched(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The process is killed, and the staged file goes with it."""
-    import threading
+    """In-process work cannot be killed, so the cancellation is honoured before commit."""
+    token = CancellationToken()
 
-    install_fake(monkeypatch, tmp_path, "import time; time.sleep(30)\n")
+    def cancelled_midway(src: Path, dst: Path, preset: str) -> None:
+        copies_input(src, dst, preset)
+        token.cancel()
+
+    install_engine(monkeypatch, cancelled_midway)
     out = tmp_path / "out.pdf"
     out.write_bytes(b"a previous run")
-    token = CancellationToken()
-    threading.Timer(0.4, token.cancel).start()
 
     with pytest.raises(CancelledError):
         run(router, source, out, cancellation=token)
@@ -591,31 +519,38 @@ def test_page_count_is_reports_the_mismatch(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The real thing
+# The real engine
 # ---------------------------------------------------------------------------
 
 
-@needs_ghostscript
-@pytest.mark.skipif(not GHOSTSCRIPT_PRESENT, reason="Ghostscript is not installed")
-def test_real_ghostscript_compresses_a_document(
-    router: EngineRouter, source: Path, tmp_path: Path
-) -> None:
-    """The one test that needs the real binary. Skipped locally, required in CI."""
+def test_the_real_engine_compresses_a_document(router: EngineRouter, tmp_path: Path) -> None:
+    src = write_image_pdf(tmp_path / "photo.pdf")
     out = tmp_path / "small.pdf"
 
-    result = run(router, source, out)
+    result = run(router, src, out, preset="screen")
 
     assert out.is_file()
-    assert page_count(out) == 3
+    assert page_count(out) == 1
     assert result.engine_version is not None
-    assert result.engine_version.startswith("gs/")
+    assert result.engine_version.startswith("pymupdf/")
+    assert result.details["saved_bytes"] > 0, "a 1200px noise image shown at 4in must shrink"
     assert staged(tmp_path) == []
 
 
-@needs_ghostscript
-@pytest.mark.skipif(not GHOSTSCRIPT_PRESENT, reason="Ghostscript is not installed")
-def test_real_ghostscript_is_found_by_the_shared_mechanism() -> None:
-    found = _binaries.find("gs")
+def test_a_lower_preset_saves_more_than_a_higher_one(router: EngineRouter, tmp_path: Path) -> None:
+    src = write_image_pdf(tmp_path / "photo.pdf")
 
-    assert found is not None
-    assert Path(found).exists() or shutil.which(found)
+    screen = run(router, src, tmp_path / "screen.pdf", preset="screen").details
+    printer = run(router, src, tmp_path / "printer.pdf", preset="printer").details
+
+    assert screen["compressed_bytes"] < printer["compressed_bytes"]
+
+
+def test_lossless_presets_keep_the_pages(
+    router: EngineRouter, source: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "default.pdf"
+
+    run(router, source, out, preset="default")
+
+    assert page_count(out) == 3

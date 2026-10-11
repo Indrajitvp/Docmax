@@ -1,16 +1,13 @@
 """The three M5 tools and the shared format vocabulary.
 
-Two of the three shell out, so this file follows `test_compress.py`'s division
-rather than `test_m4_tools.py`'s:
-
-* **Everything about behaviour** is tested against a fake Pandoc and a fake
-  pdftoppm — real programs, run as real subprocesses through the real
-  `_binaries` mechanism. What is being checked is not "does Pandoc work", which
-  is not our problem, but "does DocMax behave when it fails, hangs, lies about
-  success, or is cancelled" — and a real binary makes those cases hard to
-  produce on demand.
-* **Real conversions** are marked `needs_binary`, skipped where the program is
-  absent and required in CI.
+`to-images` renders with PyMuPDF in-process, so its misbehaviour tests swap
+`renderer.render_page` for a stand-in and its happy-path tests run the real
+engine. `convert` has two engines: Markdown/HTML to HTML/text is built in and
+tested with the real thing (see `test_native_engines.py`); every other target
+goes to Pandoc, which is tested against a fake program, run as a real subprocess
+through the real `_binaries` mechanism. What is being checked there is not "does
+Pandoc work" but "does DocMax behave when it fails, hangs, lies about success,
+or is cancelled".
 
 `from-images` needs no fake: img2pdf and Pillow are Python packages, so the real
 thing runs here.
@@ -47,6 +44,7 @@ from docmax.core.protocols import NULL_PROGRESS
 from docmax.core.registry import get_tool
 from docmax.core.router import EngineRouter
 from docmax.tools import _binaries, _formats
+from docmax.tools._engines import renderer
 
 if TYPE_CHECKING:
     from docmax.core.models import ToolResult
@@ -54,7 +52,6 @@ if TYPE_CHECKING:
 M5 = ("convert", "to-images", "from-images")
 
 needs_pandoc = pytest.mark.needs_binary("pandoc")
-needs_poppler = pytest.mark.needs_binary("pdftoppm")
 
 #: A marker rather than a module-level `importorskip`, matching the `crypto`
 #: extra's pattern in test_m4_tools.py — `from-images` is pure Python (no
@@ -157,19 +154,31 @@ else:
     open(out, "w", encoding="utf-8").write("converted\\n")
 """
 
-#: A fake pdftoppm that writes a real image for the format flag it was given.
-#: `-singlefile` means the output is exactly `<root><ext>` with no page number.
-PDFTOPPM_WRITES_IMAGES = """
-SIGNATURES = {
-    "-png": (b"\\x89PNG\\r\\n\\x1a\\n", ".png"),
-    "-jpeg": (b"\\xff\\xd8\\xff", ".jpg"),
-    "-tiff": (b"II*\\x00", ".tif"),
-}
-flag = next(a for a in args if a in SIGNATURES)
-signature, extension = SIGNATURES[flag]
-root = args[-1]
-open(root + extension, "wb").write(signature + b"body")
-"""
+
+def fake_renderer(
+    monkeypatch: pytest.MonkeyPatch,
+    writes: Any,
+) -> list[int]:
+    """Replace page rendering; `writes(index, destination)` produces the file.
+
+    Returns the zero-based page indexes it was asked for, in order.
+    """
+    asked: list[int] = []
+
+    def fake(document: Any, index: int, destination: Path, *, dpi: int, format_name: str) -> None:
+        asked.append(index)
+        writes(index, destination)
+
+    monkeypatch.setattr(renderer, "render_page", fake)
+    return asked
+
+
+PNG_HEADER = b"\x89PNG\r\n\x1a\n"
+
+
+def png_width(path: Path) -> int:
+    """The width in the IHDR chunk -- enough to prove a DPI took effect."""
+    return int.from_bytes(path.read_bytes()[16:20], "big")
 
 
 @pytest.fixture
@@ -296,29 +305,30 @@ def test_from_images_is_the_second_multi_input_tool() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_convert_reports_missing_pandoc_with_the_install_line() -> None:
-    """The router's own remedy is generic; it does not know what Pandoc is."""
+def test_convert_is_available_without_pandoc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The built-in converter ships with the package, so the engine always loads."""
     from docmax.tools.convert.local import ConvertLocal
 
-    strategy = ConvertLocal()
-    if strategy.is_available():
-        pytest.skip("pandoc is installed on this machine")
+    monkeypatch.setattr(_binaries, "find", lambda name: None)
 
-    reason = strategy.unavailable_reason()
-    assert reason is not None
-    assert "pandoc" in reason
-    assert "install" in reason.lower()
+    strategy = ConvertLocal()
+    assert strategy.is_available()
+    assert strategy.unavailable_reason() is None
 
 
 def test_a_missing_pandoc_is_reported_not_crashed(
     router: EngineRouter, notes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A Word document needs Pandoc; its absence names it, with the install line."""
+    from docmax.core.errors import LocalDependencyMissingError
+
     monkeypatch.setattr(_binaries, "find", lambda name: None)
 
-    with pytest.raises(NoEngineAvailableError) as caught:
+    with pytest.raises(LocalDependencyMissingError) as caught:
         run(router, "convert", notes, tmp_path / "out.docx", to="docx")
 
     assert "pandoc" in str(caught.value)
+    assert caught.value.remedy
 
 
 # ---------------------------------------------------------------------------
@@ -385,9 +395,9 @@ def test_convert_asks_for_a_standalone_document_by_default(
         tmp_path,
         'open(args[args.index("--output") + 1], "w").write(" ".join(args))\n',
     )
-    out = tmp_path / "out.html"
+    out = tmp_path / "out.rst"
 
-    run(router, "convert", notes, out, to="html")
+    run(router, "convert", notes, out, to="rst")
 
     assert "--standalone" in out.read_text(encoding="utf-8")
 
@@ -400,9 +410,9 @@ def test_convert_can_be_told_not_to(
         tmp_path,
         'open(args[args.index("--output") + 1], "w").write(" ".join(args))\n',
     )
-    out = tmp_path / "out.html"
+    out = tmp_path / "out.rst"
 
-    result = run(router, "convert", notes, out, to="html", standalone=False)
+    result = run(router, "convert", notes, out, to="rst", standalone=False)
 
     assert "--standalone" not in out.read_text(encoding="utf-8")
     assert result.details["standalone"] is False
@@ -516,11 +526,11 @@ def test_a_failing_pandoc_leaves_the_destination_untouched(
     router: EngineRouter, notes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     install_fake(monkeypatch, tmp_path, 'sys.stderr.write("pandoc: boom\\n"); sys.exit(1)\n')
-    out = tmp_path / "out.html"
+    out = tmp_path / "out.rst"
     out.write_text("the original", encoding="utf-8")
 
     with pytest.raises(ExternalToolFailedError):
-        run(router, "convert", notes, out, to="html")
+        run(router, "convert", notes, out, to="rst")
 
     assert out.read_text(encoding="utf-8") == "the original"
     assert not staged(tmp_path)
@@ -531,10 +541,10 @@ def test_a_pandoc_that_writes_nothing_is_caught(
 ) -> None:
     """Exiting zero having written nothing is a lie `atomic_path` already refuses."""
     install_fake(monkeypatch, tmp_path, "pass\n")
-    out = tmp_path / "out.html"
+    out = tmp_path / "out.rst"
 
     with pytest.raises(OutputValidationError):
-        run(router, "convert", notes, out, to="html")
+        run(router, "convert", notes, out, to="rst")
 
     assert not out.exists()
 
@@ -566,7 +576,7 @@ def test_whitespace_only_output_is_treated_as_a_failure(
     )
 
     with pytest.raises(OutputValidationError, match="empty"):
-        run(router, "convert", notes, tmp_path / "out.html", to="html")
+        run(router, "convert", notes, tmp_path / "out.rst", to="rst")
 
 
 def test_an_already_cancelled_convert_produces_nothing(
@@ -588,7 +598,7 @@ def test_a_pandoc_that_hangs_is_killed_at_the_deadline(
 ) -> None:
     """v2 had no timeout anywhere; a hung xelatex hung the whole application."""
     install_fake(monkeypatch, tmp_path, "import time; time.sleep(30)\n")
-    out = tmp_path / "out.html"
+    out = tmp_path / "out.rst"
 
     with pytest.raises(ExternalToolTimeoutError):
         run(
@@ -596,7 +606,7 @@ def test_a_pandoc_that_hangs_is_killed_at_the_deadline(
             "convert",
             notes,
             out,
-            to="html",
+            to="rst",
             cancellation=CancellationToken(timeout=0.5),
         )
 
@@ -645,48 +655,47 @@ def test_convert_really_converts_markdown_to_html(
 # ---------------------------------------------------------------------------
 
 
-def test_to_images_needs_no_python_imaging_library() -> None:
-    """pdftoppm writes the file itself; a second encoder would only re-encode it."""
+def test_to_images_imports_nothing_heavy_at_module_scope() -> None:
+    """PyMuPDF and Pillow are imported inside the functions that use them."""
     from docmax.tools.to_images import local
 
     assert "PIL" not in local.__dict__
-    assert local.BINARY == "pdftoppm"
+    assert "pymupdf" not in local.__dict__
+    assert not hasattr(local, "BINARY"), "no external binary any more"
 
 
-def test_to_images_names_poppler_not_just_the_executable(
+def test_to_images_names_pymupdf_when_it_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nobody installs a package called pdftoppm."""
     from docmax.tools.to_images.local import ToImagesLocal
 
-    monkeypatch.setattr(_binaries, "find", lambda name: None)
+    monkeypatch.setattr("docmax.tools.to_images.local.has_pymupdf", lambda: False)
     reason = ToImagesLocal().unavailable_reason()
 
     assert reason is not None
-    assert "Poppler" in reason
+    assert "PyMuPDF" in reason
     assert "install" in reason.lower()
 
 
-def test_a_missing_poppler_is_reported_not_crashed(
+def test_a_missing_pymupdf_is_reported_not_crashed(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_binaries, "find", lambda name: None)
+    monkeypatch.setattr("docmax.tools.to_images.local.has_pymupdf", lambda: False)
 
     with pytest.raises(NoEngineAvailableError) as caught:
         run(router, "to-images", source, tmp_path / "pages")
 
-    assert "pdftoppm" in str(caught.value)
+    assert "PyMuPDF" in str(caught.value)
 
 
 # ---------------------------------------------------------------------------
-# to-images — behaviour, against a fake pdftoppm
+# to-images — behaviour, with the real renderer
 # ---------------------------------------------------------------------------
 
 
 def test_to_images_writes_one_image_per_page(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
     out = tmp_path / "pages"
 
     result = run(router, "to-images", source, out)
@@ -703,7 +712,6 @@ def test_to_images_names_pages_in_reading_order(
     router: EngineRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Zero-padded, so a directory listing sorts the way the document reads."""
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
     source = write_pdf(tmp_path / "doc.pdf", 12)
     out = tmp_path / "pages"
 
@@ -718,7 +726,6 @@ def test_to_images_honours_a_page_selection(
     router: EngineRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A non-contiguous selection is why this renders one page per invocation."""
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
     source = write_pdf(tmp_path / "doc.pdf", 8)
     out = tmp_path / "pages"
 
@@ -737,10 +744,10 @@ def test_to_images_writes_every_declared_image_format(
     router: EngineRouter,
     source: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     image_format: str,
 ) -> None:
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
+    if image_format == "tiff" and importlib.util.find_spec("PIL") is None:
+        pytest.skip("TIFF goes through Pillow, the images extra")
     out = tmp_path / "pages"
 
     result = run(router, "to-images", source, out, format=image_format)
@@ -749,67 +756,48 @@ def test_to_images_writes_every_declared_image_format(
     assert len(list(out.glob(f"*{_formats.image(image_format).suffix}"))) == 3
 
 
-def test_the_format_flag_reaches_pdftoppm(
-    router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_the_format_reaches_the_renderer(
+    router: EngineRouter, source: Path, tmp_path: Path
 ) -> None:
-    """Poppler's own flag, not a DocMax synonym."""
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        'open(args[-1] + ".jpg", "wb").write(b"\\xff\\xd8\\xff" + " ".join(args).encode())\n',
-    )
+    """A JPEG request produces JPEG bytes, not a PNG with the wrong name."""
     out = tmp_path / "pages"
 
     run(router, "to-images", source, out, format="jpeg")
 
-    assert "-jpeg" in next(out.glob("*.jpg")).read_bytes().decode("utf-8", "replace")
+    assert next(out.glob("*.jpg")).read_bytes().startswith(b"\xff\xd8\xff")
 
 
-def test_the_dpi_reaches_pdftoppm(
+def test_the_dpi_reaches_the_renderer(router: EngineRouter, source: Path, tmp_path: Path) -> None:
+    """The page is 200pt wide: 72 dpi is 200px, 144 dpi is 400px."""
+    low, high = tmp_path / "low", tmp_path / "high"
+
+    run(router, "to-images", source, low, dpi=72, pages="1")
+    run(router, "to-images", source, high, dpi=144, pages="1")
+
+    assert png_width(next(low.glob("*.png"))) == 200
+    assert png_width(next(high.glob("*.png"))) == 400
+
+
+def test_to_images_renders_only_the_selected_page(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        'open(args[-1] + ".png", "wb").write(b"\\x89PNG\\r\\n\\x1a\\n" + " ".join(args).encode())\n',
-    )
-    out = tmp_path / "pages"
-
-    run(router, "to-images", source, out, dpi=300)
-
-    assert "-r 300" in next(out.glob("*.png")).read_bytes().decode("utf-8", "replace")
-
-
-def test_to_images_renders_one_page_per_invocation(
-    router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`-singlefile` with a one-page range is what makes DocMax own the filenames."""
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        'open(args[-1] + ".png", "wb").write(b"\\x89PNG\\r\\n\\x1a\\n" + " ".join(args).encode())\n',
-    )
+    asked = fake_renderer(monkeypatch, lambda index, dest: dest.write_bytes(PNG_HEADER + b"x"))
     out = tmp_path / "pages"
 
     run(router, "to-images", source, out, pages="2")
 
-    flags = next(out.glob("*.png")).read_bytes().decode("utf-8", "replace")
-    assert "-singlefile" in flags
-    assert "-f 2" in flags
-    assert "-l 2" in flags
+    assert asked == [1]
+    assert [p.name for p in out.glob("*.png")] == ["doc-0002.png"]
 
 
 @pytest.mark.parametrize("image_format", ["bmp", "gif"])
-def test_to_images_refuses_a_format_pdftoppm_cannot_write(
+def test_to_images_refuses_a_format_it_cannot_write(
     router: EngineRouter,
     source: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     image_format: str,
 ) -> None:
-    """Declared for `from-images`, and not something Poppler rasterises to."""
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
-
+    """Declared for `from-images`, and not something a PDF is rasterised to."""
     with pytest.raises(InvalidParameterError, match="cannot write"):
         run(router, "to-images", source, tmp_path / "pages", format=image_format)
 
@@ -817,7 +805,6 @@ def test_to_images_refuses_a_format_pdftoppm_cannot_write(
 def test_to_images_refuses_an_unknown_format(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
 
     with pytest.raises(InvalidParameterError, match="not an image format"):
         run(router, "to-images", source, tmp_path / "pages", format="webp")
@@ -827,7 +814,6 @@ def test_to_images_refuses_an_unknown_format(
 def test_to_images_refuses_a_nonsense_dpi(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dpi: Any
 ) -> None:
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
 
     with pytest.raises(InvalidParameterError):
         run(router, "to-images", source, tmp_path / "pages", dpi=dpi)
@@ -836,7 +822,6 @@ def test_to_images_refuses_a_nonsense_dpi(
 def test_to_images_refuses_a_non_pdf(
     router: EngineRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
     notes = tmp_path / "notes.txt"
     notes.write_text("not a pdf", encoding="utf-8")
 
@@ -847,7 +832,6 @@ def test_to_images_refuses_a_non_pdf(
 def test_to_images_refuses_a_corrupt_pdf(
     router: EngineRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
     broken = tmp_path / "broken.pdf"
     broken.write_bytes(b"%PDF-1.7\ngarbage")
 
@@ -864,7 +848,7 @@ def test_a_file_with_the_wrong_header_is_never_delivered(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The exact v2 bug: a .png with no PNG header, which nothing can open."""
-    install_fake(monkeypatch, tmp_path, 'open(args[-1] + ".png", "wb").write(b"not an image")\n')
+    fake_renderer(monkeypatch, lambda index, dest: dest.write_bytes(b"not an image"))
     out = tmp_path / "pages"
 
     with pytest.raises(OutputValidationError, match="no PNG header"):
@@ -876,7 +860,7 @@ def test_a_file_with_the_wrong_header_is_never_delivered(
 def test_an_empty_image_is_never_delivered(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, 'open(args[-1] + ".png", "wb").write(b"")\n')
+    fake_renderer(monkeypatch, lambda index, dest: dest.write_bytes(b""))
     out = tmp_path / "pages"
 
     with pytest.raises(OutputValidationError, match="empty file"):
@@ -888,15 +872,13 @@ def test_an_empty_image_is_never_delivered(
 def test_a_short_render_is_never_delivered(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """pdftoppm writing only some of the pages must not look like success."""
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        "import os\n"
-        "root = args[-1]\n"
-        'if not root.endswith("0003"):\n'
-        '    open(root + ".png", "wb").write(b"\\x89PNG\\r\\n\\x1a\\n")\n',
-    )
+    """A renderer writing only some of the pages must not look like success."""
+
+    def skips_the_last(index: int, dest: Path) -> None:
+        if index != 2:
+            dest.write_bytes(PNG_HEADER + b"x")
+
+    fake_renderer(monkeypatch, skips_the_last)
     out = tmp_path / "pages"
 
     with pytest.raises(OutputValidationError, match="Expected 3 image"):
@@ -905,22 +887,21 @@ def test_a_short_render_is_never_delivered(
     assert not out.exists()
 
 
-def test_a_failing_pdftoppm_leaves_no_partial_directory(
+def test_a_failing_render_leaves_no_partial_directory(
     router: EngineRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The `atomic_dir` guarantee, exercised by the second tool to need it."""
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        "root = args[-1]\n"
-        'if root.endswith("0004"):\n'
-        '    sys.stderr.write("pdftoppm: boom\\n"); sys.exit(1)\n'
-        'open(root + ".png", "wb").write(b"\\x89PNG\\r\\n\\x1a\\n")\n',
-    )
+
+    def breaks_on_page_four(index: int, dest: Path) -> None:
+        if index == 3:
+            raise CorruptDocumentError("page four would not draw")
+        dest.write_bytes(PNG_HEADER + b"x")
+
+    fake_renderer(monkeypatch, breaks_on_page_four)
     source = write_pdf(tmp_path / "doc.pdf", 6)
     out = tmp_path / "pages"
 
-    with pytest.raises(ExternalToolFailedError):
+    with pytest.raises(CorruptDocumentError):
         run(router, "to-images", source, out)
 
     assert not out.exists(), "no directory holding the first three pages"
@@ -930,7 +911,6 @@ def test_a_failing_pdftoppm_leaves_no_partial_directory(
 def test_a_cancelled_render_leaves_no_partial_directory(
     router: EngineRouter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
     source = write_pdf(tmp_path / "doc.pdf", 6)
     out = tmp_path / "pages"
     token = CancellationToken()
@@ -960,7 +940,6 @@ def test_a_cancelled_render_leaves_no_partial_directory(
 def test_to_images_reports_progress_per_page(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
     progress = RecordingProgress()
 
     run(router, "to-images", source, tmp_path / "pages", progress=progress)
@@ -973,7 +952,6 @@ def test_to_images_reports_progress_per_page(
 def test_to_images_reports_every_file_it_wrote(
     router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
     out = tmp_path / "pages"
 
     result = run(router, "to-images", source, out)
@@ -983,7 +961,6 @@ def test_to_images_reports_every_file_it_wrote(
     assert all(path.exists() for path in result.outputs)
 
 
-@needs_poppler
 @needs_images
 def test_to_images_really_renders_a_page(
     router: EngineRouter, source: Path, tmp_path: Path
@@ -1269,16 +1246,27 @@ def test_no_convertible_format_needs_an_external_pdf_engine() -> None:
     assert "pdf" not in _formats.convertible_names()
 
 
-def test_only_pandoc_and_poppler_are_needed_by_the_m5_tools() -> None:
-    """The enforcement for "no second binary": `doctor` renders this list."""
-    needed = {
+def test_the_m5_tools_require_no_external_binary() -> None:
+    """The enforcement for "pip install is enough": `doctor` renders this list.
+
+    Pandoc is still *used* by `convert`, but only for the formats that need a
+    real document model, so it is optional rather than required.
+    """
+    required = {
         binary.name
         for binary in _binaries.EXTERNAL_BINARIES
         for tool in binary.used_by
         if tool in M5
     }
+    optional = {
+        binary.name
+        for binary in _binaries.EXTERNAL_BINARIES
+        for tool in binary.optional_for
+        if tool in M5
+    }
 
-    assert needed == {"pandoc", "pdftoppm"}
+    assert required == set()
+    assert optional == {"pandoc"}
 
 
 @pytest.mark.parametrize("name", ["md", "docx", "png", "jpeg"])
@@ -1326,23 +1314,23 @@ def test_an_unknown_format_names_the_formats_command() -> None:
 def test_convert_reports_the_engine_that_did_the_work(
     router: EngineRouter, notes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    builtin = run(router, "convert", notes, tmp_path / "out.html", to="html")
+    assert builtin.engine_version is not None
+    assert builtin.engine_version.startswith("markdown/")
+
     install_fake(monkeypatch, tmp_path, PANDOC_WRITES_OUTPUT)
-
-    result = run(router, "convert", notes, tmp_path / "out.html", to="html")
-
-    assert result.engine_version is not None
-    assert result.engine_version.startswith("pandoc/")
+    rich = run(router, "convert", notes, tmp_path / "out.rst", to="rst")
+    assert rich.engine_version is not None
+    assert rich.engine_version.startswith("pandoc/")
 
 
 def test_to_images_reports_the_engine_that_did_the_work(
-    router: EngineRouter, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    router: EngineRouter, source: Path, tmp_path: Path
 ) -> None:
-    install_fake(monkeypatch, tmp_path, PDFTOPPM_WRITES_IMAGES)
-
     result = run(router, "to-images", source, tmp_path / "pages")
 
     assert result.engine_version is not None
-    assert result.engine_version.startswith("pdftoppm/")
+    assert result.engine_version.startswith("pymupdf/")
 
 
 def test_a_render_writes_nothing_outside_its_output_directory(
@@ -1354,14 +1342,10 @@ def test_a_render_writes_nothing_outside_its_output_directory(
     """A test that writes into the repository is a bug in the test, not a quirk.
 
     The working directory is asserted unchanged because that is where the damage
-    landed: the version probe's `-v` reached a fake that wrote `args[-1] + ext`,
-    producing `-v.png` next to `pyproject.toml`.
+    once landed: a fake binary wrote `args[-1] + ext`, producing `-v.png` next to
+    `pyproject.toml`. The renderer is in-process now, but the assertion is cheap
+    and the failure it names only shows up in a checkout.
     """
-    install_fake(
-        monkeypatch,
-        tmp_path,
-        'open(args[-1] + ".png", "wb").write(b"\\x89PNG\\r\\n\\x1a\\n")\n',
-    )
     cwd = Path.cwd()
     before = set(cwd.iterdir())
 

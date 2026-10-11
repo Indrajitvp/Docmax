@@ -57,7 +57,7 @@ def binary_statuses() -> list[BinaryStatus]:
                 name=binary.name,
                 found=found_path is not None,
                 path=found_path,
-                used_by=binary.used_by,
+                used_by=binary.needed_by_labels(),
                 install_hint=binary.install_hint(),
             )
         )

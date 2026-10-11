@@ -37,6 +37,12 @@ HEAVY_MODULES = (
     "openpyxl",
     "textual",
     "pypdf",
+    # The built-in engines (tools/_engines/). Base dependencies, like pypdf, and
+    # kept out of `import docmax` for the same reason: discovery runs on every
+    # `--help` and must not cost what rendering costs.
+    "pymupdf",
+    "fitz",
+    "markdown",
     "rich",
     "typer",
     "httpx",

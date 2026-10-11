@@ -3,8 +3,7 @@
 The subprocess tests use **the Python interpreter as a stand-in binary**. That
 is not a mock: it exercises the real `Popen`, the real timeout, and the real
 kill path, while needing nothing installed on the machine running the suite.
-Ghostscript-specific behaviour is tested where Ghostscript is, in
-`test_compress.py`.
+Tool-specific behaviour is tested where the tool is, e.g. `test_ocr.py`.
 
 What matters here is the guarantees v2 lacked: every call has a timeout, and
 cancelling reaches a blocked process rather than waiting politely for it.
@@ -38,26 +37,31 @@ def python(code: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_every_declared_binary_names_the_tools_that_need_it() -> None:
+def test_every_declared_binary_names_the_tools_that_want_it() -> None:
     for binary in _binaries.EXTERNAL_BINARIES:
-        assert binary.used_by, f"{binary.name} is declared but nothing uses it"
+        assert binary.used_by or binary.optional_for, (
+            f"{binary.name} is declared but nothing uses it"
+        )
 
 
-def test_ghostscript_is_declared_for_compress() -> None:
-    assert "compress" in _binaries.describe("gs").used_by
+def test_tesseract_is_required_by_ocr() -> None:
+    assert "ocr" in _binaries.describe("tesseract").used_by
 
 
-def test_ghostscript_knows_its_windows_spellings() -> None:
-    """`gs` is `gswin64c` on Windows; looking only for `gs` reports it missing.
+def test_pandoc_is_optional_for_convert_not_required() -> None:
+    """Markdown to HTML and text is built in, so nothing *needs* Pandoc."""
+    pandoc = _binaries.describe("pandoc")
 
-    And it must be the *console* build — bare `gswin64` opens a window and never
-    returns, which would hang a batch run rather than failing it.
-    """
-    candidates = _binaries.describe("gs").candidates()
+    assert "convert" in pandoc.optional_for
+    assert pandoc.used_by == ()
+    assert "convert (optional)" in pandoc.needed_by_labels()
 
-    assert "gs" in candidates
-    assert "gswin64c" in candidates
-    assert "gswin64" not in candidates
+
+def test_the_binaries_the_builtin_engines_replaced_are_gone() -> None:
+    """Ghostscript and Poppler were removed on purpose; this catches a revert."""
+    names = {binary.name for binary in _binaries.EXTERNAL_BINARIES}
+
+    assert names.isdisjoint({"gs", "pdftoppm"})
 
 
 def test_every_binary_offers_an_install_hint() -> None:
@@ -75,9 +79,9 @@ def test_install_hint_renders_the_current_platform_argv(monkeypatch: pytest.Monk
     """A user reads a command, never a Python tuple."""
     monkeypatch.setattr(_binaries, "_platform_key", lambda: "linux")
 
-    hint = _binaries.describe("gs").install_hint()
+    hint = _binaries.describe("tesseract").install_hint()
 
-    assert hint == "Install it with: apt-get install -y ghostscript"
+    assert hint == "Install it with: apt-get install -y tesseract-ocr"
 
 
 def test_install_hint_falls_back_to_every_platform_when_unrecognised(
@@ -85,10 +89,10 @@ def test_install_hint_falls_back_to_every_platform_when_unrecognised(
 ) -> None:
     monkeypatch.setattr(_binaries, "_platform_key", lambda: "bsd")
 
-    hint = _binaries.describe("gs").install_hint()
+    hint = _binaries.describe("tesseract").install_hint()
 
-    assert "linux: apt-get install -y ghostscript" in hint
-    assert "windows: winget install --id ArtifexSoftware.GhostScript -e" in hint
+    assert "linux: apt-get install -y tesseract-ocr" in hint
+    assert "windows: winget install --id UB-Mannheim.TesseractOCR -e" in hint
 
 
 # ---------------------------------------------------------------------------
@@ -133,34 +137,40 @@ def test_manager_available_never_offers_an_unverified_manager(
 
 
 def test_find_locates_something_that_exists(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gs" if name == "gs" else None)
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/bin/tesseract" if name == "tesseract" else None
+    )
 
-    assert _binaries.find("gs") == "/usr/bin/gs"
+    assert _binaries.find("tesseract") == "/usr/bin/tesseract"
 
 
 def test_find_tries_every_spelling(monkeypatch: pytest.MonkeyPatch) -> None:
-    """On Windows only the third candidate exists."""
+    """A binary with several command names is found by whichever one exists."""
+    spelled = _binaries.Binary(
+        name="widget", used_by=("x",), commands=("widget", "widget-cli", "widget-console")
+    )
+    monkeypatch.setitem(_binaries._BY_NAME, "widget", spelled)
     monkeypatch.setattr(
-        shutil, "which", lambda name: r"C:\gs\gswin32c.exe" if name == "gswin32c" else None
+        shutil, "which", lambda name: "/opt/widget-console" if name == "widget-console" else None
     )
 
-    assert _binaries.find("gs") == r"C:\gs\gswin32c.exe"
+    assert _binaries.find("widget") == "/opt/widget-console"
 
 
 def test_find_returns_none_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda name: None)
 
-    assert _binaries.find("gs") is None
+    assert _binaries.find("tesseract") is None
 
 
 def test_require_names_the_tool_and_the_fix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda name: None)
 
     with pytest.raises(LocalDependencyMissingError) as caught:
-        _binaries.require("gs", tool="compress")
+        _binaries.require("tesseract", tool="ocr")
 
-    assert caught.value.dependency == "gs"
-    assert "compress" in str(caught.value)
+    assert caught.value.dependency == "tesseract"
+    assert "ocr" in str(caught.value)
     assert caught.value.remedy, "the install line is the whole point"
 
 

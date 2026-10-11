@@ -58,8 +58,9 @@ HELP_SECTIONS: tuple[HelpSection, ...] = (
     ),
     HelpSection(
         "System check",
-        "Some local engines depend on external programs — Ghostscript, "
-        "Tesseract, Poppler, Pandoc among them. System check, in this menu, "
+        "Rendering, compression and simple conversions are built in. Two "
+        "optional programs add more: Tesseract (local OCR) and Pandoc (Word, "
+        "EPUB and other rich formats). System check, in this menu, "
         "reports which are installed and how to get the ones that are not.",
     ),
     HelpSection(

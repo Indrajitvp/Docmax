@@ -208,6 +208,11 @@ class ToolSpec:
     #: Lets ``setup`` (and anything else router-adjacent) ask "what does this
     #: tool need" generically, without a lookup table of its own.
     requires_binaries: tuple[str, ...] = ()
+    #: External programs that widen what this tool can do but are not needed
+    #: to run it -- ``convert`` writes Word and EPUB with Pandoc, and does
+    #: Markdown to HTML without. ``doctor`` reports them as optional and
+    #: ``setup <tool>`` offers them; nothing else treats them as missing.
+    optional_binaries: tuple[str, ...] = ()
     #: The pip extra (see ``pyproject.toml``'s ``[project.optional-dependencies]``)
     #: that installs this tool's Python dependency, or ``None`` if the tool
     #: needs no extra (a pure ``pypdf`` tool) or only an external binary.

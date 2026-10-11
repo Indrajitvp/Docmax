@@ -1,6 +1,6 @@
 # ADR 0011 — `convert` is Pandoc-only at M5: no PDF in, no PDF out, and no derived output path
 
-**Status:** Accepted · 2026-08-26
+**Status:** Accepted · 2026-08-26 — *amended by [ADR 0041](0041-core-engines-are-built-in.md): Markdown/HTML to HTML and text no longer need Pandoc. The format boundary (no PDF in or out) is unchanged.*
 
 ## Context
 

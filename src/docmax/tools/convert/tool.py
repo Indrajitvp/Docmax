@@ -3,7 +3,7 @@
 Imported during discovery -- on every ``--help`` -- so it imports nothing but
 ``core`` and the format table, and does no work at import time. Pandoc is not
 looked for here; that happens in ``local.py``, which nobody touches until this
-tool runs.
+tool runs. Pandoc is optional: Markdown/HTML to HTML/text is built in.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from docmax.tools._formats import convertible_names
 SPEC = register(
     ToolSpec(
         name="convert",
-        summary="Convert a document to another format with Pandoc.",
+        summary="Convert a document to another format (Word, EPUB and more need Pandoc).",
         category="convert",
         module=__name__.rpartition(".")[0],
         # Both, since M6. Installing Pandoc is exactly the pain cloud exists to
@@ -39,8 +39,9 @@ SPEC = register(
         # required `-o`; this is what lets `tui/app.py` know it too, instead
         # of silently diverging the way issue #24 found. See ADR 0033.
         output_required=True,
-        # used_by=("convert",) in tools/_binaries.py, recorded here too.
-        requires_binaries=("pandoc",),
+        # Not `requires_binaries`: Pandoc widens what this tool can write but
+        # is not required to run it -- Markdown to HTML and text is built in.
+        optional_binaries=("pandoc",),
         params=(
             Param(
                 name="to",

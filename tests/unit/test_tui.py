@@ -3884,7 +3884,9 @@ def test_binary_statuses_matches_the_declaration_doctor_reads() -> None:
     statuses = status.binary_statuses()
 
     assert [s.name for s in statuses] == [b.name for b in _binaries.EXTERNAL_BINARIES]
-    assert [s.used_by for s in statuses] == [b.used_by for b in _binaries.EXTERNAL_BINARIES]
+    assert [s.used_by for s in statuses] == [
+        b.needed_by_labels() for b in _binaries.EXTERNAL_BINARIES
+    ]
 
 
 def test_binary_statuses_found_reflects_binaries_find(monkeypatch: pytest.MonkeyPatch) -> None:

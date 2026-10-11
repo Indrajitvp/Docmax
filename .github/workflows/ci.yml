@@ -85,7 +85,7 @@ jobs:
           fi
 
           # --- the expensive half ---------------------------------------
-          # Golden tests install Ghostscript, Tesseract, Pandoc and Poppler on
+          # Golden tests install Tesseract and Pandoc on
           # three operating systems. That is minutes of package manager, and it
           # cannot tell you anything a pull request has broken until the pull
           # request has actually touched an engine.
@@ -239,17 +239,17 @@ jobs:
             sleep 5
           done
           sudo apt-get install -y --no-install-recommends \
-            ghostscript tesseract-ocr tesseract-ocr-deu poppler-utils pandoc
+            tesseract-ocr tesseract-ocr-deu pandoc
 
       - name: external tools (macOS)
         if: runner.os == 'macOS'
         timeout-minutes: 15
-        run: brew install ghostscript tesseract poppler pandoc
+        run: brew install tesseract pandoc
 
       - name: external tools (Windows)
         if: runner.os == 'Windows'
         timeout-minutes: 15
-        run: choco install --no-progress -y ghostscript tesseract pandoc poppler
+        run: choco install --no-progress -y tesseract pandoc
 
       - run: python -m pip install -e ".[dev,all]"
 
