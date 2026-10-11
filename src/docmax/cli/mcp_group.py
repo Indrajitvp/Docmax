@@ -31,6 +31,8 @@ showed, never a guess at a schema this codebase cannot verify.
 from __future__ import annotations
 
 import json
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
@@ -38,7 +40,7 @@ from typing import Annotated, Any
 import platformdirs
 import typer
 
-from docmax.cli import commands
+from docmax.cli import commands, mcp_probe
 from docmax.cli.render import console, out
 from docmax.core.branding import CLI_NAME
 
@@ -134,9 +136,28 @@ class ClientTarget:
     supports_remote: bool
 
 
+def claude_desktop_config_dir() -> Path:
+    r"""Where Claude Desktop keeps its config on this machine.
+
+    The Microsoft Store build of Claude Desktop is sandboxed: its "AppData"
+    lives under ``%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming``, and
+    the ordinary ``%APPDATA%\Claude`` is a directory the app never reads. Writing
+    there reports success and changes nothing, so the packaged location wins
+    whenever it exists.
+    """
+    standard = Path(platformdirs.user_config_dir("Claude", roaming=True))
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        for package in sorted((Path(local) / "Packages").glob("Claude_*")):
+            packaged = package / "LocalCache" / "Roaming" / "Claude"
+            if packaged.is_dir():
+                return packaged
+    return standard
+
+
 def known_clients(project_root: Path) -> list[ClientTarget]:
     """Every client this command can wire up, in the order they are reported."""
-    claude_desktop_dir = Path(platformdirs.user_config_dir("Claude", roaming=True))
+    claude_desktop_dir = claude_desktop_config_dir()
     cursor_dir = Path.home() / ".cursor"
 
     return [
@@ -166,14 +187,32 @@ def known_clients(project_root: Path) -> list[ClientTarget]:
 # ---------------------------------------------------------------------------
 
 
+def launch_command() -> tuple[str, list[str]]:
+    """An absolute command that starts *this* installation, from anywhere.
+
+    A bare ``docmax`` only works where the client's ``PATH`` happens to include
+    the directory pip installed it into. Claude Desktop, Cursor and every other
+    GUI app are launched by the desktop, not a shell, so they see neither a
+    virtualenv's ``Scripts`` directory nor a ``--user`` install's, and the
+    server silently never starts. The interpreter running ``connect`` is, by
+    construction, the one that has DocMax and the ``mcp`` extra, so the entry
+    names it outright.
+    """
+    if getattr(sys, "frozen", False):
+        return sys.executable, []
+    package = __package__.partition(".")[0] if __package__ else CLI_NAME
+    return sys.executable, ["-m", package]
+
+
 def local_entry(roots: list[Path], *, allow_cloud: bool) -> dict[str, Any]:
     """The stdio entry: how a client should start `docmax mcp` itself."""
-    args: list[str] = ["mcp"]
+    command, prefix = launch_command()
+    args: list[str] = [*prefix, "mcp"]
     for one_root in roots:
         args.extend(["--root", str(one_root)])
     if allow_cloud:
         args.append("--allow-cloud")
-    return {"command": CLI_NAME, "args": args}
+    return {"command": command, "args": args}
 
 
 def remote_entry(*, endpoint: str, api_key: str) -> dict[str, Any]:
@@ -295,6 +334,14 @@ def connect(
             help="Also write Claude Code's project-scoped .mcp.json in the target directory.",
         ),
     ] = True,
+    check: Annotated[
+        bool,
+        typer.Option(
+            "--check/--no-check",
+            help="Start the server the way the client will and confirm it answers, "
+            "before writing anything.",
+        ),
+    ] = True,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would change; write nothing.")
     ] = False,
@@ -334,6 +381,8 @@ def connect(
         entry = remote_entry(endpoint=config.cloud_endpoint, api_key=config.api_key)
     else:
         entry = local_entry(roots, allow_cloud=allow_cloud)
+        if check:
+            _require_working(entry, cwd=project_root)
 
     candidates = known_clients(project_root)
     if client:
@@ -407,6 +456,78 @@ def connect(
         out.print()
         for item in plan:
             out.print(f"  [green]{item.client}: wrote {item.path}[/green]")
+
+
+def _explain_probe(result: mcp_probe.ProbeResult) -> str:
+    """The probe's failure text, plus the install line when the SDK is the cause."""
+    from docmax.mcp import INSTALL_HINT, is_available
+
+    text = result.detail
+    if not is_available():
+        text += f"\nThe MCP package is not installed for this interpreter: {INSTALL_HINT}"
+    return text
+
+
+def _require_working(entry: dict[str, Any], *, cwd: Path) -> mcp_probe.ProbeResult:
+    """Start ``entry`` as a client would; refuse to go on if it does not answer.
+
+    Run *before* anything is written, so a config that cannot work never
+    replaces one that might.
+    """
+    from docmax.cli import json_output
+    from docmax.cli.render import render_error
+    from docmax.core.errors import DependencyError
+
+    if not json_output.enabled():
+        console.print("Starting the server the way your AI app will...")
+    result = mcp_probe.probe(entry, cwd=cwd)
+    if result.ok:
+        if not json_output.enabled():
+            console.print(
+                f"[green]OK: {result.server} {result.version} answered "
+                f"with {len(result.tools)} tools.[/green]"
+            )
+        return result
+
+    exc = DependencyError(
+        "The MCP server did not start cleanly, so nothing was written.\n" + _explain_probe(result),
+        remedy="Fix the above, or pass --no-check to write the entry anyway.",
+        context={"command": entry.get("command"), "args": entry.get("args")},
+    )
+    render_error(exc)
+    raise typer.Exit(1)
+
+
+@mcp_app.command("check")
+def check_command(
+    root: _RootOption = None,
+    allow_cloud: _AllowCloudOption = False,
+    json_out: commands.JsonOption = False,
+) -> None:
+    """Confirm the server starts and lists its tools, without touching any config.
+
+    Runs the same command `connect` would write, completes the MCP handshake
+    with it, and reports the tool count. Use it when an AI app shows no DocMax
+    tools: if this passes, the fault is in the app's config or a restart is
+    missing; if it fails, the output says what the server itself reported.
+    """
+    from docmax.cli import json_output
+    from docmax.cli.render import _emit
+
+    json_output.note(json_out)
+    roots = [p.resolve() for p in root] if root else [Path.cwd()]
+    entry = local_entry(roots, allow_cloud=allow_cloud)
+    result = mcp_probe.probe(entry, cwd=roots[0])
+
+    if json_output.enabled():
+        _emit(json_output.report({"entry": entry, **result.as_report()}))
+    elif result.ok:
+        out.print(f"[green]OK: {result.server} {result.version}: {len(result.tools)} tools[/green]")
+        out.print("  " + ", ".join(result.tools))
+    else:
+        console.print("[red]FAILED: the server did not answer.[/red]\n" + _explain_probe(result))
+    if not result.ok:
+        raise typer.Exit(1)
 
 
 def _report_nothing_to_do(

@@ -106,9 +106,27 @@ class DocMaxServer:
                 title=spec.name,
                 description=schema.described(spec),
                 input_schema=schema.input_schema(spec),
+                annotations=self._annotations(spec),
             )
             for spec in iter_tools()
         ]
+
+    def _annotations(self, spec: ToolSpec) -> types.ToolAnnotations:
+        """Behaviour hints a client uses to decide what to ask permission for.
+
+        Derived from the spec and the policy, never from a tool's name: a tool
+        that writes nothing is read-only, and *no* tool is destructive because
+        the atomic writers refuse to replace an existing file (ADR 0003). Without
+        these, clients treat every call as potentially destructive and prompt for
+        each one, including `get-info`.
+        """
+        return types.ToolAnnotations(
+            title=spec.name,
+            read_only_hint=not spec.produces_output,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=self._policy.allow_cloud,
+        )
 
     async def on_list_tools(
         self,
