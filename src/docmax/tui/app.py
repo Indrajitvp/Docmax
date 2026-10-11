@@ -48,6 +48,7 @@ import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from rich.text import Text
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
@@ -65,7 +66,7 @@ from textual.widgets import (
 
 from docmax import __version__
 from docmax.core.branding import APP_NAME
-from docmax.tui import catalog, content, forms, runner, status
+from docmax.tui import catalog, content, forms, runner, status, theme
 from docmax.tui.browser import (
     merge_paths,
     pick_directory,
@@ -74,6 +75,7 @@ from docmax.tui.browser import (
     remember_directory,
     render_paths,
 )
+from docmax.tui.styles import STYLES
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -434,12 +436,14 @@ class Brand(Horizontal):
 
     DEFAULT_CSS = """
     Brand {
-        height: 1;
-        background: $panel;
+        height: 3;
+        background: $surface;
+        border-bottom: solid $panel-lighten-1;
+        align-vertical: middle;
     }
     Brand > #brand-title {
         width: auto;
-        color: $accent;
+        color: $primary;
         text-style: bold;
         padding: 0 2;
     }
@@ -565,20 +569,21 @@ class ToolListScreen(Screen[None]):
         output = "a directory" if spec.produces_directory else f"a {spec.default_suffix} file"
         inputs = "multiple documents" if spec.accepts_multiple_inputs else "one document"
         self.query_one("#preview-title", Static).update(spec.name)
-        self.query_one("#preview-body", Static).update(
-            "\n".join(
-                [
-                    spec.summary,
-                    "",
-                    f"category   {spec.category}",
-                    f"engines    {engines}",
-                    f"input      {inputs}",
-                    f"output     {output}",
-                    "",
-                    "Enter to open this tool.",
-                ]
-            )
-        )
+
+        # A `Text`, not markup: a tool's summary is data and may contain brackets.
+        # `str()` of it is the same plain lines the tests and a screen reader see;
+        # the styles only dim the labels and bold the values.
+        body = Text(spec.summary + "\n\n")
+        for label, value in (
+            ("category", spec.category),
+            ("engines", engines),
+            ("input", inputs),
+            ("output", output),
+        ):
+            body.append(f"{label:<10}", style="dim")
+            body.append(f"{value}\n", style="bold")
+        body.append("\nEnter to open this tool.", style="italic dim")
+        self.query_one("#preview-body", Static).update(body)
 
     # -- nav menu (GitHub #39: help, system check, cloud/account) ----------
 
@@ -1106,6 +1111,10 @@ class RunScreen(Screen[None]):
             yield Label("engine")
             yield _select(_ENGINES, default="auto", id_="field-__engine__")
 
+        # The action dock sits outside the scrolling form so Run, the status
+        # line and the result card are always on screen however long the form
+        # is -- a button that scrolls away is a button people cannot find.
+        with Vertical(id="dock"):
             with Horizontal(classes="actions"):
                 yield Button("Run", variant="primary", id="run")
                 yield Button("Dry run", id="dry-run")
@@ -1847,6 +1856,10 @@ class BatchScreen(Screen[None]):
             yield Label("engine")
             yield _select(_ENGINES, default="auto", id_="field-__engine__")
 
+            yield DataTable(id="batch-results")
+            yield Static("", id="batch-summary", classes="hint", markup=False)
+
+        with Vertical(id="dock"):
             with Horizontal(classes="actions"):
                 yield Button("Run", variant="primary", id="run")
                 yield Button("Dry run", id="dry-run")
@@ -1854,8 +1867,6 @@ class BatchScreen(Screen[None]):
                 yield Button("Cancel run", variant="warning", id="cancel", disabled=True)
 
             yield Static("", id="status", classes="status-idle", markup=False)
-            yield DataTable(id="batch-results")
-            yield Static("", id="batch-summary", classes="hint", markup=False)
         yield Static(
             "Ctrl+R Run   Ctrl+C Cancel   Esc Back   Tab Next field",
             id="help",
@@ -2401,164 +2412,23 @@ class DependencyMissingScreen(ModalScreen[str]):
 class DocMaxApp(App[None]):
     """The application shell.
 
-    Styling leans on Textual's own design tokens (``$accent``, ``$panel``,
-    ``$text-muted``, …) and a bundled theme, rather than hardcoded colours —
+    Styling leans on design tokens (``$accent``, ``$panel``, ``$text-muted``, …)
+    supplied by the palettes in ``tui/theme.py`` and laid out in
+    ``tui/styles.py``, rather than hardcoded colours —
     the same reason ``core/branding.py`` is the only place that names the
     product: one seam to change, not colours scattered through every screen.
     """
 
     TITLE = APP_NAME
-    CSS = """
-    Screen { background: $background; }
-
-    .title { text-style: bold; color: $foreground; padding: 0 0 1 0; }
-    .hint { color: $text-muted; padding: 0 0 1 0; }
-    .remedy { color: $accent; padding: 1 0 0 0; }
-
-    /* -- workspace: sidebar + preview -------------------------------- */
-
-    #body { height: 1fr; }
-
-    #sidebar {
-        width: 38;
-        border-right: solid $panel-lighten-1;
-        padding: 0 1;
-    }
-    #search { margin: 1 1 1 0; }
-    #open-batch { width: 1fr; margin: 0 0 1 0; }
-    #tools { padding: 0 1 1 0; }
-
-    .category {
-        color: $accent;
-        text-style: bold;
-        padding: 1 0 0 1;
-    }
-    .tool-column { height: auto; padding: 0 0 0 1; }
-    /* Button's built-in default style sets border-top/border-bottom as
-       separate longhand rules of equal-or-higher specificity than a plain
-       class selector, so a shorthand `border: none` here is silently lost.
-       Matching on type-plus-class (`Button.tool-button`) wins the tie and
-       turns the button into a flat row instead of a boxed widget. */
-    Button.tool-button {
-        width: auto;
-        min-width: 0;
-        margin: 0;
-        padding: 0 2;
-        border-top: none;
-        border-bottom: none;
-        background: transparent;
-        color: $foreground;
-    }
-    Button.tool-button:focus {
-        text-style: bold;
-        color: $text;
-        background: $accent 30%;
-    }
-    Button.tool-button:hover {
-        color: $accent;
-        border-top: none;
-        background: transparent;
-    }
-
-    #preview {
-        width: 1fr;
-        padding: 1 3;
-    }
-    #preview-title { color: $accent; text-style: bold; padding: 0 0 1 0; }
-
-    .help-bar {
-        height: 1;
-        background: $panel;
-        color: $text-muted;
-        padding: 0 2;
-    }
-
-    /* -- run screen: a single card ------------------------------------ */
-
-    #form, #batch-form { padding: 1 2; }
-    .panel {
-        height: auto;
-        border: round $panel-lighten-2;
-        background: $surface;
-        padding: 1 2;
-    }
-    .actions { height: auto; padding: 1 0; }
-    .actions Button { margin-right: 1; }
-    /* Hidden by default (`RunScreen.on_mount`); shown by `_show_result_actions`
-       once a run has actually succeeded, hidden again by `_start` the moment
-       the next one begins. */
-    .result-actions { height: auto; padding: 1 0 0 0; }
-    .result-actions Button { margin-right: 1; }
-    .input-row { height: auto; }
-    .input-row Input { width: 1fr; }
-    .input-row Button { margin-left: 1; }
-    /* issue #25: a typed path that doesn't resolve says so in the field
-       itself, not only in the hint line underneath it. */
-    .input-row Input.invalid { border: round $error; }
-    .hint.invalid { color: $error; }
-    .component-row { height: auto; }
-    .component { width: 1fr; margin-right: 1; height: auto; }
-    .mode-group { height: auto; }
-    .component-label { color: $text-muted; text-style: bold; }
-    #details { color: $text-muted; padding: 1 0 0 0; height: auto; }
-
-    /* Status line: idle / running / succeeded / failed read as distinct
-       states — colour and weight driven by ``RunScreen._set_status``'s
-       ``state``, never by anything about a particular tool. See issue #26. */
-    #status { padding: 0 0 1 0; }
-    #status.status-idle { color: $text-muted; text-style: none; }
-    #status.status-running { color: $warning; text-style: bold; }
-    #status.status-success { color: $success; text-style: bold; }
-    #status.status-error { color: $error; text-style: bold; }
-
-    /* -- modals -------------------------------------------------------- */
-
-    .modal {
-        width: 70;
-        height: auto;
-        padding: 1 2;
-        border: round $accent;
-        background: $surface;
-    }
-    /* Heavier than the round/$accent border every other modal gets: an error
-       is deliberately the most visually weighty thing the TUI shows. */
-    .modal.error { border: heavy $error; background: $error 10%; }
-    .error-heading { height: auto; padding: 0 0 1 0; }
-    .error-icon {
-        width: auto;
-        color: $error;
-        text-style: bold;
-        padding: 0 1 0 0;
-    }
-    .modal.error .title { color: $error; padding: 0; }
-    .error-message { text-style: bold; padding: 0 0 1 0; }
-    /* Same weight as `.modal.error`, in `$warning` rather than `$error`:
-       a missing dependency is a stop-and-fix condition, but not a failure
-       this run caused — see `DependencyMissingScreen` (ADR 0036). */
-    .modal.warning { border: heavy $warning; background: $warning 10%; }
-    .modal.warning .title { color: $warning; padding: 0; }
-    ModalScreen { align: center middle; }
-
-    .menu-actions { height: auto; padding: 1 0 0 0; }
-    .menu-actions Button { width: 1fr; margin-bottom: 1; }
-
-    /* -- help, system check, cloud status: static/table content -------- */
-
-    #help-content, #system-check-content, #cloud-status-content { padding: 1 2; }
-    .help-heading {
-        color: $accent;
-        text-style: bold;
-        padding: 1 0 0 0;
-    }
-    .help-body { color: $foreground; padding: 0 0 1 0; }
-    #system-check-table, #cloud-status-table, #batch-results { margin: 1 0; }
-    """
+    CSS = STYLES
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+q", "quit", "Quit", show=True, priority=True),
     ]
 
     def on_mount(self) -> None:
-        self.theme = "tokyo-night"
+        for palette in theme.THEMES:
+            self.register_theme(palette)
+        self.theme = theme.DEFAULT
         self.push_screen(ToolListScreen())
 
 

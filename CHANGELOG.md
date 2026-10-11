@@ -29,6 +29,16 @@ and rebuilds everything underneath it.
 - Cancelling `compress` mid-run now takes effect when the in-process work returns,
   rather than killing a subprocess; nothing is written either way.
 
+### Changed — TUI visual redesign
+
+- New palettes (`tui/theme.py`: dark `docmax`, light `docmax-light`, switchable from the
+  command palette) and a single stylesheet (`tui/styles.py`) built only from theme tokens.
+- Flat, consistent buttons with one filled primary; Cancel sits alone at the far right.
+- **Run, status and the result card now live in a dock below the form**, so they stay on
+  screen however long the form is. Fields are dense single rows with a focus bar.
+- Taller header; the tool preview shows aligned, styled facts. Widget ids and classes are
+  unchanged.
+
 ### Breaking
 
 These are behaviour changes a v2 user can actually hit. See
