@@ -139,7 +139,18 @@ Button.tool-button:focus {
 
 /* -- run screen: a single card -------------------------------------------------- */
 
-#form, #batch-form { padding: 1 3; }
+#form { padding: 1 3; }
+#batch-form { padding: 1 1 1 3; width: 1fr; }
+#batch-live { width: 1fr; margin: 1 3 1 1; height: 1fr; }
+#batch-body.-stacked { layout: vertical; }
+#batch-body.-stacked #batch-form { padding: 1 3 0 3; height: auto; max-height: 55%; }
+#batch-body.-stacked #batch-live { margin: 1 3; }
+#batch-bar { width: 1fr; padding: 1 0 0 0; }
+#batch-bar Bar { width: 1fr; }
+#batch-bar Bar > .bar--bar { color: $primary; background: $panel; }
+#batch-bar Bar > .bar--complete { color: $success; }
+#batch-stats { padding: 1 0 0 0; }
+#open-batch-output { margin-right: 1; }
 .panel {
     height: auto;
     border: round $panel-lighten-2;
@@ -238,7 +249,8 @@ ModalScreen { align: center middle; background: $background 70%; }
     padding: 1 0 0 0;
 }
 .help-body { color: $foreground; padding: 0 0 1 0; }
-#system-check-table, #cloud-status-table, #batch-results { margin: 1 0; }
+#system-check-table, #cloud-status-table { margin: 1 0; }
+#batch-results { margin: 1 0; height: 1fr; }
 """
 
 __all__ = ["STYLES"]

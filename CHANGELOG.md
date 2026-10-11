@@ -10,6 +10,15 @@ structurally unable to grow — no tests, no atomic writes, no typed errors, and
 a single-engine design with hardcoded dispatch. v3 keeps the command surface
 and rebuilds everything underneath it.
 
+### Changed — the TUI batch screen shows the run as it happens
+
+- **Every document is queued up front** and moves through queued, running and done (or failed) as
+  the batch works through them, with a spinner on the active row and a per-document time.
+- **A progress bar and a live summary** (`3 of 12 done · 2 ok · 1 failed · 0:07 elapsed · ~0:21 left`)
+  sit beside the form on wide terminals and stack under it on narrow ones.
+- **A cancelled or refused run** marks the documents that never ran instead of leaving them looking
+  pending, and a finished run offers **Open output folder**.
+
 ### Changed — zero system binaries for the core tools
 
 - **`to-images`, `compress` and Markdown/HTML `convert` no longer need Poppler,

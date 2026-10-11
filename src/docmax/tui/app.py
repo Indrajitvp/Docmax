@@ -60,6 +60,7 @@ from textual.widgets import (
     DataTable,
     Input,
     Label,
+    ProgressBar,
     Select,
     Static,
 )
@@ -108,6 +109,39 @@ _STATUS_ICONS: dict[str, str] = {
     "success": "✔",
     "error": "✘",
 }
+
+
+#: One glyph and one theme token per state a batch row can be in. ``queued`` and
+#: ``skipped`` are deliberately quiet; ``running`` borrows the warning colour the
+#: status line already uses for work in flight.
+_BATCH_ROW_STYLE: dict[str, tuple[str, str]] = {
+    "queued": ("○", "text-muted"),
+    "running": ("◐", "warning"),
+    "ok": ("✔", "success"),
+    "failed": ("✘", "error"),
+    "skipped": ("·", "text-muted"),
+}
+
+
+def _clock(seconds: float) -> str:
+    """``m:ss`` -- a batch can run for an hour, so no sub-second noise."""
+    whole = max(0, int(seconds))
+    return f"{whole // 60}:{whole % 60:02d}"
+
+
+def _row_id(path: Path) -> str:
+    """The key a document's row is filed under.
+
+    ``run_batch`` resolves every source before it reports an outcome, so the
+    row has to be found by the *resolved* path or a relative or ``~`` path typed
+    into the form would never match the outcome that comes back for it.
+    """
+    from pathlib import Path as _Path
+
+    try:
+        return str(_Path(path).expanduser().resolve())
+    except OSError:
+        return str(path)
 
 
 def _select(choices: tuple[str, ...], *, default: object, id_: str) -> Select[str]:
@@ -1799,6 +1833,8 @@ class BatchScreen(Screen[None]):
         Binding("ctrl+c", "cancel", "Cancel run", show=True, priority=True),
     ]
 
+    _SPINNER_FRAMES: ClassVar[str] = "◐◓◑◒"
+
     def __init__(self) -> None:
         super().__init__()
         self._tools: list[ToolSpec] = catalog.batchable_tools()
@@ -1806,6 +1842,14 @@ class BatchScreen(Screen[None]):
         self._token: Any = None
         self._run_in_progress = False
         self._force = False
+        # Live-progress state. One entry per document, keyed by ``_row_id``.
+        self._row_state: dict[str, str] = {}
+        self._run_started_at: float | None = None
+        self._item_started_at: float | None = None
+        self._spinner_index = 0
+        self._ticker: Any = None
+        self._output_dir: Path | None = None
+        self._dry_run = False
 
     @property
     def _tool_names(self) -> tuple[str, ...]:
@@ -1826,44 +1870,55 @@ class BatchScreen(Screen[None]):
         default_tool = names[0] if names else ""
 
         yield Brand()
-        with VerticalScroll(id="batch-form"), Vertical(classes="panel"):
-            yield Static("Batch", classes="title", markup=False)
-            yield Static(
-                "Run one tool over many documents. Each output is named after "
-                "its input and written into the output directory.",
-                classes="hint",
-                markup=False,
-            )
-
-            yield Label("tool")
-            yield _select(names, default=default_tool, id_="field-__tool__")
-
-            yield Label("inputs, comma-separated")
-            with Horizontal(classes="input-row"):
-                yield Input(placeholder="paths to the documents", id="field-__inputs__")
-                yield Button("Browse…", id="browse-inputs")
-
-            yield Label("output directory (required)")
-            with Horizontal(classes="input-row"):
-                yield Input(
-                    placeholder="directory to write results into",
-                    id="field-__output-dir__",
+        with Horizontal(id="batch-body"):
+            with VerticalScroll(id="batch-form"), Vertical(classes="panel"):
+                yield Static("Batch", classes="title", markup=False)
+                yield Static(
+                    "Run one tool over many documents. Each output is named after "
+                    "its input and written into the output directory.",
+                    classes="hint",
+                    markup=False,
                 )
-                yield Button("Browse…", id="browse-output-dir")
 
-            yield _BatchParamsPanel(self._spec_named(default_tool))
+                yield Label("tool")
+                yield _select(names, default=default_tool, id_="field-__tool__")
 
-            yield Label("engine")
-            yield _select(_ENGINES, default="auto", id_="field-__engine__")
+                yield Label("inputs, comma-separated")
+                with Horizontal(classes="input-row"):
+                    yield Input(placeholder="paths to the documents", id="field-__inputs__")
+                    yield Button("Browse…", id="browse-inputs")
 
-            yield DataTable(id="batch-results")
-            yield Static("", id="batch-summary", classes="hint", markup=False)
+                yield Label("output directory (required)")
+                with Horizontal(classes="input-row"):
+                    yield Input(
+                        placeholder="directory to write results into",
+                        id="field-__output-dir__",
+                    )
+                    yield Button("Browse…", id="browse-output-dir")
+
+                yield _BatchParamsPanel(self._spec_named(default_tool))
+
+                yield Label("engine")
+                yield _select(_ENGINES, default="auto", id_="field-__engine__")
+
+            with Vertical(id="batch-live", classes="panel"):
+                yield Static("Progress", classes="title", markup=False)
+                yield ProgressBar(total=1, show_eta=False, id="batch-bar")
+                yield Static(
+                    "Choose documents and press Run. Each one shows up here as it is processed.",
+                    id="batch-stats",
+                    classes="hint",
+                    markup=False,
+                )
+                yield DataTable(id="batch-results")
+                yield Static("", id="batch-summary", classes="hint", markup=False)
 
         with Vertical(id="dock"):
             with Horizontal(classes="actions"):
                 yield Button("Run", variant="primary", id="run")
                 yield Button("Dry run", id="dry-run")
                 yield Button("Overwrite output", id="force")
+                yield Button("Open output folder", id="open-batch-output")
                 yield Button("Cancel run", variant="warning", id="cancel", disabled=True)
 
             yield Static("", id="status", classes="status-idle", markup=False)
@@ -1876,8 +1931,24 @@ class BatchScreen(Screen[None]):
 
     def on_mount(self) -> None:
         table = self.query_one("#batch-results", DataTable)
-        table.add_columns("", "Document", "Result")
+        table.cursor_type = "none"
+        table.zebra_stripes = True
+        table.add_column("", key="state", width=2)
+        table.add_column("Document", key="document")
+        table.add_column("Result", key="result")
+        table.add_column("Time", key="time", width=6)
         self._fields = self.query_one(_BatchParamsPanel).fields
+        self.query_one("#open-batch-output", Button).display = False
+        self._fit_layout()
+
+    def on_resize(self) -> None:
+        self._fit_layout()
+
+    def _fit_layout(self) -> None:
+        """Side by side when there is room, stacked when there is not -- the
+        progress panel is the point of this screen, so it must never end up
+        squeezed to nothing beside the form."""
+        self.query_one("#batch-body").set_class(self.size.width < 110, "-stacked")
 
     # -- actions --------------------------------------------------------
 
@@ -2071,8 +2142,11 @@ class BatchScreen(Screen[None]):
         self.query_one("#cancel", Button).disabled = False
         self.query_one("#run", Button).disabled = True
         self._set_status("Running…", state="running")
-        self.query_one("#batch-results", DataTable).clear()
         self.query_one("#batch-summary", Static).update("")
+        self.query_one("#open-batch-output", Button).display = False
+        self._output_dir = output_dir
+        self._dry_run = dry_run
+        self._begin_progress(inputs)
         self._execute(tool, inputs, output_dir, engine, params, dry_run=dry_run, force=force)
 
     @work(thread=True, exclusive=True)
@@ -2133,16 +2207,121 @@ class BatchScreen(Screen[None]):
         self._token = None
         self.query_one("#cancel", Button).disabled = True
         self.query_one("#run", Button).disabled = False
+        if self._ticker is not None:
+            self._ticker.stop()
+            self._ticker = None
+        # Anything still queued or running never got an outcome: the run was
+        # cancelled, or the whole batch was refused. Say so rather than leave
+        # a row looking as though it is still about to be processed.
+        for key, state in list(self._row_state.items()):
+            if state in ("queued", "running"):
+                self._set_row(key, "skipped", result="not run")
+        self._refresh_stats(final=True)
+
+    # -- live progress ------------------------------------------------------
+
+    def _tone(self, token: str) -> str:
+        return str(self.app.theme_variables.get(token, ""))
+
+    def _glyph(self, state: str) -> Text:
+        glyph, token = _BATCH_ROW_STYLE[state]
+        if state == "running":
+            glyph = self._SPINNER_FRAMES[self._spinner_index % len(self._SPINNER_FRAMES)]
+        return Text(glyph, style=self._tone(token))
+
+    def _begin_progress(self, inputs: tuple[Path, ...]) -> None:
+        """Queue one row per document before the first one starts, so the whole
+        job is visible up front and every row then moves through the same
+        queued -> running -> done sequence."""
+        table = self.query_one("#batch-results", DataTable)
+        table.clear()
+        self._row_state.clear()
+        for source in inputs:
+            self._add_row(source)
+        bar = self.query_one("#batch-bar", ProgressBar)
+        bar.update(total=max(len(self._row_state), 1), progress=0)
+        self._run_started_at = time.monotonic()
+        self._advance_queue()
+        self._refresh_stats()
+        if self._ticker is None:
+            self._ticker = self.set_interval(0.2, self._tick)
+
+    def _add_row(self, source: Path) -> str:
+        key = _row_id(source)
+        if key not in self._row_state:
+            table = self.query_one("#batch-results", DataTable)
+            table.add_row(self._glyph("queued"), source.name, "waiting", "", key=key)
+            self._row_state[key] = "queued"
+        return key
+
+    def _advance_queue(self) -> None:
+        """Mark the next queued document as the one being worked on. The batch
+        runs strictly in order, one at a time, so "the next queued row" is
+        always the one ``run_batch`` has just started."""
+        for key, state in self._row_state.items():
+            if state == "queued":
+                self._set_row(key, "running", result="processing…")
+                self._item_started_at = time.monotonic()
+                return
+        self._item_started_at = None
+
+    def _set_row(
+        self, key: str, state: str, *, result: str | None = None, seconds: float | None = None
+    ) -> None:
+        table = self.query_one("#batch-results", DataTable)
+        self._row_state[key] = state
+        table.update_cell(key, "state", self._glyph(state))
+        if result is not None:
+            table.update_cell(key, "result", result, update_width=True)
+        if seconds is not None:
+            table.update_cell(key, "time", f"{seconds:.1f}s")
+
+    def _tick(self) -> None:
+        """Animate the running row and keep the clock moving between outcomes."""
+        self._spinner_index += 1
+        table = self.query_one("#batch-results", DataTable)
+        for key, state in self._row_state.items():
+            if state == "running":
+                table.update_cell(key, "state", self._glyph("running"))
+                if self._item_started_at is not None:
+                    elapsed = time.monotonic() - self._item_started_at
+                    table.update_cell(key, "time", f"{elapsed:.0f}s")
+        self._refresh_stats()
+
+    def _refresh_stats(self, *, final: bool = False) -> None:
+        states = list(self._row_state.values())
+        total = len(states)
+        ok = states.count("ok")
+        failed = states.count("failed")
+        done = ok + failed
+        elapsed = time.monotonic() - self._run_started_at if self._run_started_at else 0.0
+        parts = [f"{done} of {total} done", f"{ok} ok", f"{failed} failed"]
+        parts.append(f"{_clock(elapsed)} elapsed")
+        if not final and 0 < done < total:
+            parts.append(f"~{_clock(elapsed / done * (total - done))} left")
+        self.query_one("#batch-stats", Static).update("  ·  ".join(parts))
+        self.query_one("#batch-bar", ProgressBar).update(progress=done)
 
     def _append_outcome(self, outcome: ItemOutcome) -> None:
-        table = self.query_one("#batch-results", DataTable)
+        # A row normally exists already (``_begin_progress`` queued it). One may
+        # not -- an outcome reported for a document the form never listed -- and
+        # it is added then rather than dropped.
+        key = self._add_row(outcome.source)
+        seconds = time.monotonic() - self._item_started_at if self._item_started_at else None
         if outcome.ok:
-            result_text = str(outcome.destination) if outcome.destination else "—"
-            table.add_row(_STATUS_ICONS["success"], outcome.source.name, result_text)
-            return
-        error = outcome.error
-        result_text = f"{error.code.value}: {error.message}" if error is not None else "failed"
-        table.add_row(_STATUS_ICONS["error"], outcome.source.name, result_text)
+            name = outcome.destination.name if outcome.destination else "—"
+            self._set_row(
+                key,
+                "ok",
+                result=f"would write {name}" if self._dry_run else name,
+                seconds=seconds,
+            )
+        else:
+            error = outcome.error
+            text = f"{error.code.value}: {error.message}" if error is not None else "failed"
+            self._set_row(key, "failed", result=text, seconds=seconds)
+        self._advance_queue()
+        self._refresh_stats()
 
     def _finished_report(self, report: BatchReport) -> None:
         summary = f"{len(report.succeeded)} succeeded, {len(report.failed)} failed"
@@ -2150,6 +2329,13 @@ class BatchScreen(Screen[None]):
             summary += " — stopped early"
         self.query_one("#batch-summary", Static).update(summary)
         self._set_status(summary, state="error" if report.failed or report.cancelled else "success")
+        if report.succeeded and not self._dry_run and self._output_dir is not None:
+            self.query_one("#open-batch-output", Button).display = True
+
+    @on(Button.Pressed, "#open-batch-output")
+    def _on_open_output(self) -> None:
+        if self._output_dir is not None:
+            _open_path(self._output_dir)
 
     def _show(self, exc: BaseException) -> None:
         """Display any whole-batch failure as a message and a remedy. Never a
