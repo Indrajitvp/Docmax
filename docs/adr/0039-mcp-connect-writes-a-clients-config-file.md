@@ -78,6 +78,26 @@ secret, in the same trust boundary, doing the job it was stored for.
   `docmax mcp connect` and keep the manual snippet as the fallback for a
   client not on the list.
 
+## Amendment — the entry must be startable, and proven so
+
+The first version wrote `"command": "docmax"`. That resolves in a terminal and
+fails in the clients this command exists for: Claude Desktop and Cursor are
+launched by the desktop, with neither a shell's `PATH` nor a virtualenv's
+`Scripts` directory, so the server never started and nothing said why. Three
+changes:
+
+- The entry names the running interpreter by absolute path and starts the
+  package with `-m` (`src/docmax/__main__.py`). That interpreter is the one that
+  has DocMax and the `mcp` extra.
+- `connect` starts the entry it is about to write and completes the first three
+  messages of the handshake (`cli/mcp_probe.py`). A server that does not answer
+  blocks the write; `--no-check` opts out. `docmax mcp check` runs the same probe
+  alone. The probe speaks raw JSON-RPC so it cannot share a bug with the SDK.
+- Claude Desktop's Store build keeps its config under
+  `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude`; writing to
+  `%APPDATA%\Claude` reports success and changes nothing, so the packaged
+  directory wins when it exists.
+
 ## Enforcement
 
 - `tests/unit/test_cli_mcp_connect.py` covers: merge-only writes (an existing

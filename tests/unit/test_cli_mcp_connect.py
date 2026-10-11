@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
-from docmax.cli import mcp_group
+from docmax.cli import mcp_group, mcp_probe
 from docmax.cli.main import app
 
 runner = CliRunner()
@@ -56,6 +57,28 @@ def isolated_json_state() -> Any:
     json_output.set_enabled(False)
     yield
     json_output.set_enabled(False)
+
+
+_ANSWERED = mcp_probe.ProbeResult(True, server="docmax", version="0", tools=("merge", "split"))
+
+
+@pytest.fixture(autouse=True)
+def stub_probe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[dict[str, Any]]:
+    """No test here starts a real server, and none can see a real Store install.
+
+    The handshake itself is covered in `test_mcp_probe.py`. Everything here
+    asserts what `connect` does with the result, so it takes a canned one and
+    records which entries were probed.
+    """
+    probed: list[dict[str, Any]] = []
+
+    def fake(entry: dict[str, Any], **_: Any) -> mcp_probe.ProbeResult:
+        probed.append(entry)
+        return _ANSWERED
+
+    monkeypatch.setattr(mcp_probe, "probe", fake)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "no-local-appdata"))
+    return probed
 
 
 @pytest.fixture
@@ -106,8 +129,9 @@ def test_yes_writes_the_project_file(no_other_clients: None, tmp_path: Path) -> 
 
     assert result.exit_code == 0
     written = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
-    assert written["mcpServers"]["docmax"]["command"] == "docmax"
-    assert written["mcpServers"]["docmax"]["args"] == ["mcp", "--root", str(tmp_path)]
+    command, prefix = mcp_group.launch_command()
+    assert written["mcpServers"]["docmax"]["command"] == command
+    assert written["mcpServers"]["docmax"]["args"] == [*prefix, "mcp", "--root", str(tmp_path)]
 
 
 def test_allow_cloud_is_carried_into_the_entry(no_other_clients: None, tmp_path: Path) -> None:
@@ -154,7 +178,7 @@ def test_an_existing_unrelated_server_entry_survives(
     written = json.loads(config_path.read_text(encoding="utf-8"))
     assert written["mcpServers"]["other-tool"] == {"command": "othertool"}
     assert written["someOtherTopLevelKey"] is True
-    assert written["mcpServers"]["docmax"]["command"] == "docmax"
+    assert written["mcpServers"]["docmax"]["command"] == mcp_group.launch_command()[0]
 
 
 def test_an_existing_docmax_entry_is_reported_as_an_update_not_a_create(
@@ -327,5 +351,123 @@ def test_merged_reports_an_existing_docmax_entry() -> None:
 def test_local_entry_has_one_root_flag_per_root() -> None:
     entry = mcp_group.local_entry([Path("/a"), Path("/b")], allow_cloud=False)
 
-    assert entry["args"] == ["mcp", "--root", str(Path("/a")), "--root", str(Path("/b"))]
+    assert entry["args"][-5:] == ["mcp", "--root", str(Path("/a")), "--root", str(Path("/b"))]
     assert "--allow-cloud" not in entry["args"]
+
+
+# ---------------------------------------------------------------------------
+# The command a client will run
+# ---------------------------------------------------------------------------
+
+
+def test_the_entry_names_an_absolute_interpreter_not_a_bare_command() -> None:
+    """A GUI client has no shell `PATH`; a bare `docmax` is the silent failure."""
+    entry = mcp_group.local_entry([Path("/a")], allow_cloud=False)
+
+    assert Path(entry["command"]).is_absolute()
+    assert entry["command"] != "docmax"
+
+
+def test_the_entry_starts_this_installation_as_a_module() -> None:
+    command, prefix = mcp_group.launch_command()
+
+    assert command == sys.executable
+    assert prefix == ["-m", "docmax"]
+
+
+# ---------------------------------------------------------------------------
+# Verifying before writing
+# ---------------------------------------------------------------------------
+
+
+def test_connect_probes_the_exact_entry_it_is_about_to_write(
+    no_other_clients: None, tmp_path: Path, stub_probe: list[dict[str, Any]]
+) -> None:
+    runner.invoke(app, ["mcp", "connect", "--root", str(tmp_path), "--yes"])
+
+    written = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+    assert stub_probe == [written["mcpServers"]["docmax"]]
+
+
+def test_a_server_that_does_not_answer_blocks_the_write(
+    no_other_clients: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broken = mcp_probe.ProbeResult(False, detail="ModuleNotFoundError: No module named 'mcp'")
+    monkeypatch.setattr(mcp_probe, "probe", lambda *a, **k: broken)
+
+    result = runner.invoke(app, ["mcp", "connect", "--root", str(tmp_path), "--yes"])
+
+    assert result.exit_code == EXIT_FAILURE
+    assert "No module named 'mcp'" in shown(result)
+    assert not (tmp_path / ".mcp.json").exists(), "a config that cannot work must not be written"
+
+
+def test_no_check_writes_without_starting_anything(
+    no_other_clients: None, tmp_path: Path, stub_probe: list[dict[str, Any]]
+) -> None:
+    result = runner.invoke(app, ["mcp", "connect", "--root", str(tmp_path), "--no-check", "--yes"])
+
+    assert result.exit_code == 0
+    assert stub_probe == []
+    assert (tmp_path / ".mcp.json").exists()
+
+
+def test_remote_entries_are_not_probed_as_stdio(
+    no_other_clients: None,
+    cloud_env: tuple[str, str],
+    tmp_path: Path,
+    stub_probe: list[dict[str, Any]],
+) -> None:
+    runner.invoke(app, ["mcp", "connect", "--root", str(tmp_path), "--remote", "--yes"])
+
+    assert stub_probe == []
+
+
+def test_check_reports_the_tool_count(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["mcp", "check", "--root", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "2 tools" in shown(result)
+
+
+def test_check_fails_with_the_servers_own_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broken = mcp_probe.ProbeResult(False, detail="boom from the server")
+    monkeypatch.setattr(mcp_probe, "probe", lambda *a, **k: broken)
+
+    result = runner.invoke(app, ["mcp", "check", "--root", str(tmp_path)])
+
+    assert result.exit_code == EXIT_FAILURE
+    assert "boom from the server" in shown(result)
+
+
+# ---------------------------------------------------------------------------
+# Claude Desktop: the Store build keeps its config somewhere else
+# ---------------------------------------------------------------------------
+
+
+def test_the_store_build_of_claude_desktop_wins_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    standard = tmp_path / "roaming" / "Claude"
+    standard.mkdir(parents=True)
+    packaged = tmp_path / "Packages" / "Claude_abc123" / "LocalCache" / "Roaming" / "Claude"
+    packaged.mkdir(parents=True)
+    monkeypatch.setattr(
+        "docmax.cli.mcp_group.platformdirs.user_config_dir", lambda *a, **k: str(standard)
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+
+    assert mcp_group.claude_desktop_config_dir() == packaged
+
+
+def test_the_standard_location_is_used_without_a_store_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    standard = tmp_path / "roaming" / "Claude"
+    monkeypatch.setattr(
+        "docmax.cli.mcp_group.platformdirs.user_config_dir", lambda *a, **k: str(standard)
+    )
+
+    assert mcp_group.claude_desktop_config_dir() == standard

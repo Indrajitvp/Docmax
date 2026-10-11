@@ -34,12 +34,28 @@ A typical client configuration:
 {
   "mcpServers": {
     "docmax": {
-      "command": "docmax",
-      "args": ["mcp", "--root", "/home/you/Documents"]
+      "command": "/home/you/.venv/bin/python",
+      "args": ["-m", "docmax", "mcp", "--root", "/home/you/Documents"]
     }
   }
 }
 ```
+
+The command is an absolute interpreter path plus `-m docmax` (`src/docmax/__main__.py`),
+not a bare `docmax`. Claude Desktop and Cursor are launched by the desktop, which
+has neither a shell's `PATH` nor a virtualenv's `Scripts` directory, so a bare name
+fails with nothing to look up. The interpreter that ran `connect` is by definition
+the one that has DocMax and the `mcp` extra.
+
+`connect` starts that exact entry before writing (`cli/mcp_probe.py`: `initialize`,
+`initialized`, `tools/list` over its stdio) and refuses to write a config that does
+not answer; `--no-check` skips it. `docmax mcp check` runs the same probe on its own.
+For Claude Desktop it prefers the Microsoft Store build's sandboxed config
+(`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude`) when present, since
+the ordinary `%APPDATA%\Claude` is a directory that build never reads. Tools carry
+`readOnlyHint` (nothing written), `destructiveHint: false` (existing files are
+never replaced) and `openWorldHint` (cloud enabled), so clients stop prompting for
+every call.
 
 `docmax mcp connect` writes exactly this into a client's own config file
 instead — see [ADR 0039](../adr/0039-mcp-connect-writes-a-clients-config-file.md)
